@@ -348,6 +348,16 @@ function showJobForm(empId, jobId) {
   $('#fCode').focus();
 }
 
+/* ---------- xuất CSV (quản lý) ---------- */
+function exportCsv() {
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rows = [['Nhân viên', 'Mã NV', 'Năm', 'Tháng', 'Idea code', 'Bắt đầu', 'Hoàn thành file', 'Số ngày']];
+  for (const j of DB.jobs) { const e = DB.employees.find((x) => x.id === j.empId); rows.push([e?.name, e?.code, j.year, j.month, j.ideaCode, j.start, j.end || '', daysBetween(j.start, j.end) ?? '']); }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + rows.map((r) => r.map(q).join(',')).join('\n')], { type: 'text/csv' }));
+  a.download = `job3d-${S.year}.csv`; a.click();
+}
+
 /* ---------- khung chính ---------- */
 function render() {
   const me = DB.employees.find((e) => e.id === S.myEmpId);
