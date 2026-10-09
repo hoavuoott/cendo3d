@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Quản lý job 3D</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--line:#dee0e3;--tx:#1f2329;--mu:#646a73;--pri:#1456f0;--pri-l:#e1eaff;--red:#d83931;--grn:#00875a}
+@media (prefers-color-scheme:dark){:root{--bg:#16181c;--card:#1f2228;--line:#363a42;--tx:#e8eaed;--mu:#9aa0a8;--pri:#5b8cff;--pri-l:#26324d;--red:#ff6b64;--grn:#38c793}}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 Arial,Helvetica,sans-serif;background:var(--bg);color:var(--tx)}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:10px 16px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:5}
+header h1{font-size:16px;margin:0;flex:1}
+main{max-width:1000px;margin:0 auto;padding:16px}
+button{font:inherit;background:var(--pri);color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+button.sec{background:transparent;color:var(--pri);border:1px solid var(--pri)}
+button.danger{background:transparent;color:var(--red);border:1px solid var(--red)}
+button.ghost{background:transparent;color:var(--mu);border:1px solid var(--line)}
+button:disabled{opacity:.45;cursor:default}
+input,select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--tx);width:100%}
+label{display:block;font-size:12px;color:var(--mu);margin:10px 0 3px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.grid{display:grid;gap:12px}
+.g-emp{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}
+.g-month{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
+.emp{cursor:pointer;position:relative}.emp:hover,.month:hover{border-color:var(--pri)}
+.emp h3{margin:0 0 2px;font-size:15px}.mu{color:var(--mu);font-size:12px}
+.emp .x{position:absolute;top:8px;right:8px;padding:2px 8px}
+.month{cursor:pointer;text-align:center}.month b{font-size:22px;display:block}
+.month.cur{outline:2px solid var(--pri-l);border-color:var(--pri)}.month.sel{background:var(--pri-l);border-color:var(--pri)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}.row.sp{justify-content:space-between}
+.crumb{color:var(--pri);cursor:pointer}
+table{width:100%;border-collapse:collapse}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{font-size:12px;color:var(--mu);font-weight:600}
+td img{width:54px;height:54px;object-fit:cover;border-radius:6px;cursor:zoom-in;display:block}
+.tag{display:inline-block;font-size:11px;padding:1px 8px;border-radius:10px;background:var(--pri-l);color:var(--pri)}
+.tag.ok{background:rgba(0,135,90,.14);color:var(--grn)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:20;padding:12px}
+.modal .box{background:var(--card);border-radius:12px;padding:18px;width:100%;max-width:420px;max-height:92vh;overflow:auto}
+.modal h2{margin:0 0 4px;font-size:16px}.err{color:var(--red);font-size:12px;margin-top:6px;min-height:16px}
+.empty{text-align:center;color:var(--mu);padding:24px}
+.lb{cursor:zoom-out}.lb img{max-width:95vw;max-height:92vh;border-radius:8px}
+.scroll{overflow-x:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Quản lý job 3D</h1>
+  <span id="who" class="mu"></span>
+  <button class="ghost" id="btnRefresh">Làm mới</button>
+  <button class="ghost" id="btnCsv" style="display:none">Xuất CSV</button>
+  <button class="ghost" id="btnOut">Đăng xuất</button>
+</header>
+<main id="app"></main>
+<div id="modalRoot"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js"></script>
+
+<script>
+const BUCKET = 'job-images';
+let sb;
+let DB = { employees: [], jobs: [] };
+const S = { role: null /* 'manager' | 'employee' */, email: '', myEmpId: null, empId: null, year: new Date().getFullYear(), month: null };
+const IMG = {};   // image_path -> signed url
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const isManager = () => S.role === 'manager';
+const canEdit = (empId) => isManager() || S.myEmpId === empId;
+const fmtDate = (d) => (d ? d.split('-').reverse().join('/') : '—');
+const daysBetween = (a, b) => (a && b ? Math.round((new Date(b) - new Date(a)) / 864e5) + 1 : null);
+const empJobs = (id) => DB.jobs.filter((j) => j.empId === id);
+const newId = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
+const errText = (e) => {
+  const m = (e && (e.message || e.error_description)) || String(e);
+  if (e && e.code === '23505') return /idea/.test(e.message + (e.details || '')) ? 'Idea code này đã có trong danh sách của nhân viên.' : 'Mã nhân viên hoặc email đã tồn tại.';
+  if (e && e.code === '42501' || /row-level security/i.test(m)) return 'Bạn không có quyền thực hiện thao tác này.';
+  if (/Invalid login/i.test(m)) return 'Sai email hoặc mật khẩu.';
+  if (/Email not confirmed/i.test(m)) return 'Email chưa được xác nhận. Hãy bấm vào link trong email Supabase đã gửi.';
+  if (/already registered/i.test(m)) return 'Email này đã đăng ký. Hãy bấm Đăng nhập.';
+  if (/Password should be/i.test(m)) return 'Mật khẩu tối thiểu 6 ký tự.';
+  return m;
+};
+
+/* ---------- modal ---------- */
+function modal(html, cls = '', lock = false) {
+  const root = $('#modalRoot');
+  root.innerHTML = `<div class="modal ${cls}"><div class="box">${html}</div></div>`;
+  const m = root.firstElementChild; if (lock) m.dataset.lock = '1';
+  m.addEventListener('mousedown', (e) => { if (e.target === m && !m.dataset.lock) closeModal(); });
+  return m;
+}
+const closeModal = () => { $('#modalRoot').innerHTML = ''; };
+const busy = (btn, on) => { if (btn) { btn.disabled = on; if (on) btn.dataset.t = btn.textContent, btn.textContent = 'Đang xử lý…'; else if (btn.dataset.t) btn.textContent = btn.dataset.t; } };
+
+/* ---------- đăng nhập ---------- */
+function showLogin(msg = '') {
+  S.role = null; S.empId = null; S.myEmpId = null; $('#who').textContent = ''; $('#app').innerHTML = '';
+  setHeader(false);
+  modal(`<h2>Đăng nhập</h2><div class="mu">Dùng email công ty đã được quản lý đăng ký cho bạn.</div>
+    <label>Email</label><input id="lEmail" type="email" autocomplete="username">
+    <label>Mật khẩu</label><input id="lPass" type="password" autocomplete="current-password">
+    <div class="err" id="err">${esc(msg)}</div>
+    <div class="row"><button id="login">Đăng nhập</button><button class="sec" id="signup">Tạo tài khoản lần đầu</button></div>
+    <div class="row"><span class="crumb" id="forgot">Quên mật khẩu?</span></div>`, '', true);
+  const val = () => ({ email: $('#lEmail').value.trim(), password: $('#lPass').value });
+  $('#lPass').onkeydown = (e) => { if (e.key === 'Enter') $('#login').click(); };
+  $('#login').onclick = async () => {
+    const { email, password } = val(); if (!email || !password) return ($('#err').textContent = 'Nhập email và mật khẩu.');
+    busy($('#login'), true);
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    busy($('#login'), false);
+    if (error) return ($('#err').textContent = errText(error));
+    closeModal(); afterLogin();
+  };
+  $('#signup').onclick = async () => {
+    const { email, password } = val(); if (!email || password.length < 6) return ($('#err').textContent = 'Nhập email và mật khẩu (tối thiểu 6 ký tự).');
+    busy($('#signup'), true);
+    const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
+    busy($('#signup'), false);
+    if (error) return ($('#err').textContent = errText(error));
+    if (data.session) { closeModal(); afterLogin(); }
+    else $('#err').innerHTML = '<span class="ok" style="color:var(--grn)">Đã gửi email xác nhận. Bấm vào link trong email, rồi quay lại đăng nhập.</span>';
+  };
+  $('#forgot').onclick = async () => {
+    const { email } = val(); if (!email) return ($('#err').textContent = 'Nhập email trước rồi bấm lại.');
+    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+    $('#err').innerHTML = error ? esc(errText(error)) : '<span style="color:var(--grn)">Đã gửi email đặt lại mật khẩu.</span>';
+  };
+}
+function showNewPassword() {
+  modal(`<h2>Đặt mật khẩu mới</h2><label>Mật khẩu mới</label><input id="np" type="password" autocomplete="new-password">
+    <div class="err" id="err"></div><div class="row"><button id="ok">Lưu</button></div>`, '', true);
+  $('#ok').onclick = async () => {
+    const { error } = await sb.auth.updateUser({ password: $('#np').value });
+    if (error) return ($('#err').textContent = errText(error));
+    closeModal(); afterLogin();
+  };
+}
+function setHeader(on) { ['#btnRefresh', '#btnOut'].forEach((s) => ($(s).style.display = on ? '' : 'none')); $('#btnCsv').style.display = on && isManager() ? '' : 'none'; }
+
+async function afterLogin() {
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return showLogin();
+  S.email = session.user.email;
+  const [m, e] = await Promise.all([sb.rpc('is_manager'), sb.rpc('my_employee_id')]);
+  if (m.error || e.error) return showLogin('Không kiểm tra được quyền: ' + errText(m.error || e.error) + ' (đã chạy schema.sql chưa?)');
+  S.myEmpId = e.data || null; S.role = m.data ? 'manager' : 'employee';
+  if (S.role === 'employee' && !S.myEmpId) {
+    setHeader(true); $('#who').textContent = S.email;
+    $('#app').innerHTML = `<div class="card empty">Email <b>${esc(S.email)}</b> chưa được gắn với nhân viên nào.<br>Hãy nhờ quản lý thêm bạn vào danh sách với đúng email này, rồi bấm "Làm mới".</div>`; return;
+  }
+  S.empId = S.role === 'employee' ? S.myEmpId : null; S.month = null;
+  setHeader(true); await reload();
+}
+
+/* ---------- dữ liệu ---------- */
+const toJob = (r) => ({ id: r.id, empId: r.employee_id, year: r.year, month: r.month, ideaCode: r.idea_code, start: r.start_date, end: r.end_date, imagePath: r.image_path });
+async function reload() {
+  $('#app').innerHTML = '<div class="empty">Đang tải…</div>';
+  const emps = await sb.from('employees').select('*').order('name');
+  if (emps.error) { $('#app').innerHTML = `<div class="card empty err">Lỗi tải dữ liệu: ${esc(errText(emps.error))}</div>`; return; }
+  DB.employees = emps.data;
+  await loadJobs(); render();
+}
+async function loadJobs() {
+  const rows = []; const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await sb.from('jobs').select('*').eq('year', S.year).order('start_date').range(from, from + PAGE - 1);
+    if (error) { alert('Lỗi tải job: ' + errText(error)); break; }
+    rows.push(...data); if (data.length < PAGE) break;
+  }
+  DB.jobs = rows.map(toJob);
+  const paths = DB.jobs.map((j) => j.imagePath).filter((p) => p && !IMG[p]);
+  if (paths.length) {
+    const { data } = await sb.storage.from(BUCKET).createSignedUrls(paths, 3600);
+    (data || []).forEach((x) => { if (x.signedUrl) IMG[x.path] = x.signedUrl; });
+  }
+}
+const imgUrl = (j) => (j.imagePath && IMG[j.imagePath]) || '';
+
+/* ---------- danh sách nhân viên ---------- */
+function renderEmployees() {
+  const cards = DB.employees.map((e) => {
+    const yr = empJobs(e.id), done = yr.filter((j) => j.end).length;
+    return `<div class="card emp" data-id="${e.id}">
+      ${isManager() ? `<span style="position:absolute;top:8px;right:8px;display:flex;gap:4px"><button class="sec" data-edit-emp="${e.id}" style="padding:2px 8px">Sửa</button><button class="danger" data-del="${e.id}" style="padding:2px 8px">Xóa</button></span>` : ''}
+      <h3>${esc(e.name)}</h3><div class="mu">Mã NV: ${esc(e.code)}</div>
+      ${isManager() ? `<div class="mu">${e.email ? esc(e.email) : '<span style="color:var(--red)">chưa có email – chưa đăng nhập được</span>'}</div>` : ''}
+      <div style="margin-top:8px"><span class="tag">${yr.length} job năm ${S.year}</span> <span class="tag ok">${done} đã xong file</span></div></div>`;
+  }).join('');
+  $('#app').innerHTML = `
+    <div class="row sp"><h2 style="margin:0;font-size:17px">Nhân viên</h2>
+      <div class="row" style="margin:0"><button class="ghost" id="yPrev">‹</button><b>${S.year}</b><button class="ghost" id="yNext">›</button>
+      ${isManager() ? '<button id="addEmp">+ Thêm nhân viên</button>' : ''}</div></div>
+    ${DB.employees.length ? `<div class="grid g-emp">${cards}</div>` : `<div class="card empty">Chưa có nhân viên nào.${isManager() ? ' Bấm "+ Thêm nhân viên" để bắt đầu.' : ''}</div>`}`;
+  $('#yPrev').onclick = () => changeYear(-1); $('#yNext').onclick = () => changeYear(1);
+  if (isManager()) $('#addEmp').onclick = () => showEmployeeForm();
+  document.querySelectorAll('.emp').forEach((c) => c.onclick = (ev) => {
+    if (ev.target.closest('[data-del],[data-edit-emp]')) return; S.empId = c.dataset.id; S.month = null; render();
+  });
+  document.querySelectorAll('[data-del]').forEach((b) => b.onclick = () => confirmDeleteEmployee(b.dataset.del));
+  document.querySelectorAll('[data-edit-emp]').forEach((b) => b.onclick = () => showEmployeeForm(b.dataset.editEmp));
+}
+async function changeYear(d) { S.year += d; S.month = null; $('#app').innerHTML = '<div class="empty">Đang tải…</div>'; await loadJobs(); render(); }
+
+function showEmployeeForm(id) {
+  const e = id ? DB.employees.find((x) => x.id === id) : null;
+  modal(`<h2>${e ? 'Sửa nhân viên' : 'Thêm nhân viên'}</h2>
+    <label>Họ tên *</label><input id="nName" value="${esc(e?.name || '')}">
+    <label>Mã nhân viên *</label><input id="nCode" value="${esc(e?.code || '')}" placeholder="vd: VNH">
+    <label>Email đăng nhập của nhân viên</label><input id="nMail" type="email" value="${esc(e?.email || '')}" placeholder="nhanvien@congty.com">
+    <div class="mu" style="margin-top:4px">Nhân viên đăng nhập bằng đúng email này để tự nhập job của mình.</div>
+    <div class="err" id="err"></div>
+    <div class="row"><button id="ok">${e ? 'Lưu' : 'Thêm'}</button><button class="ghost" id="cancel">Hủy</button></div>`);
+  $('#cancel').onclick = closeModal;
+  $('#ok').onclick = async () => {
+    const name = $('#nName').value.trim(), code = $('#nCode').value.trim().toUpperCase(), email = $('#nMail').value.trim().toLowerCase() || null;
+    if (!name || !code) return ($('#err').textContent = 'Nhập đủ họ tên và mã nhân viên.');
+    busy($('#ok'), true);
+    const q = e ? sb.from('employees').update({ name, code, email }).eq('id', e.id) : sb.from('employees').insert({ name, code, email });
+    const { error } = await q; busy($('#ok'), false);
+    if (error) return ($('#err').textContent = errText(error));
+    closeModal(); await reload();
+  };
+  $('#nName').focus();
+}
+function confirmDeleteEmployee(id) {
+  const e = DB.employees.find((x) => x.id === id), n = empJobs(id).length;
+  modal(`<h2>Xóa nhân viên?</h2><p>Xóa <b>${esc(e.name)}</b> sẽ xóa luôn các job đã ghi nhận và ảnh của người này (${n} job trong năm ${S.year}, chưa kể các năm khác). Không thể hoàn tác.</p>
+    <div class="err" id="err"></div><div class="row"><button class="danger" id="yes">Xóa</button><button class="ghost" id="no">Hủy</button></div>`);
+  $('#no').onclick = closeModal;
+  $('#yes').onclick = async () => {
+    busy($('#yes'), true);
+    try { const { data } = await sb.storage.from(BUCKET).list(id, { limit: 1000 }); if (data && data.length) await sb.storage.from(BUCKET).remove(data.map((f) => `${id}/${f.name}`)); } catch (x) {}
+    const { error } = await sb.from('employees').delete().eq('id', id); busy($('#yes'), false);
+    if (error) return ($('#err').textContent = errText(error));
+    closeModal(); await reload();
+  };
+}
+
+/* ---------- trang nhân viên ---------- */
+function renderEmployee() {
+  const e = DB.employees.find((x) => x.id === S.empId);
+  if (!e) { S.empId = null; return render(); }
+  const now = new Date(), curY = now.getFullYear(), curM = now.getMonth() + 1;
+  const js = empJobs(e.id);
+  let months = '';
+  for (let m = 1; m <= 12; m++) {
+    const c = js.filter((j) => j.month === m), d = c.filter((j) => j.end).length;
+    months += `<div class="card month ${S.year === curY && m === curM ? 'cur' : ''} ${S.month === m ? 'sel' : ''}" data-m="${m}"><div class="mu">Tháng ${m}</div><b>${c.length}</b><div class="mu">${d} xong file</div></div>`;
+  }
+  let detail = '<div class="empty">Chọn một tháng để xem hoặc nhập job.</div>';
+  if (S.month) {
+    const list = js.filter((j) => j.month === S.month), editable = canEdit(e.id);
+    detail = `<div class="card" style="margin-top:14px">
+      <div class="row sp"><b>Tháng ${S.month}/${S.year} · ${list.length} job</b>
+      ${editable ? '<button id="addJob">+ Thêm job</button>' : '<span class="mu">Chỉ xem (không phải job của bạn)</span>'}</div>
+      ${list.length ? `<div class="scroll"><table><tr><th>Idea code</th><th>Bắt đầu</th><th>Hoàn thành file</th><th>Số ngày</th><th>Ảnh</th><th></th></tr>
+      ${list.map((j) => { const d = daysBetween(j.start, j.end), u = imgUrl(j); return `<tr>
+        <td><b>${esc(j.ideaCode)}</b></td><td>${fmtDate(j.start)}</td>
+        <td>${j.end ? fmtDate(j.end) : '<span class="tag">Đang làm</span>'}</td><td>${d ?? '—'}</td>
+        <td>${u ? `<img src="${u}" data-img="${j.id}" alt="">` : '—'}</td>
+        <td style="white-space:nowrap">${editable ? `<button class="sec" data-edit="${j.id}">Sửa</button> <button class="danger" data-rm="${j.id}">Xóa</button>` : ''}</td></tr>`; }).join('')}
+      </table></div>` : '<div class="empty">Chưa có job nào trong tháng này.</div>'}</div>`;
+  }
+  $('#app').innerHTML = `
+    ${isManager() || DB.employees.length > 1 ? '<div class="row"><span class="crumb" id="back">‹ Danh sách nhân viên</span></div>' : ''}
+    <div class="row sp"><div><h2 style="margin:0">${esc(e.name)}</h2><div class="mu">Mã NV: ${esc(e.code)} · ${js.length} job năm ${S.year}</div></div>
+      <div class="row" style="margin:0"><button class="ghost" id="yPrev">‹</button><b>Năm ${S.year}</b><button class="ghost" id="yNext">›</button></div></div>
+    <div class="grid g-month">${months}</div>${detail}`;
+  const back = $('#back'); if (back) back.onclick = () => { S.empId = null; S.month = null; render(); };
+  $('#yPrev').onclick = () => changeYear(-1); $('#yNext').onclick = () => changeYear(1);
+  document.querySelectorAll('.month').forEach((c) => c.onclick = () => { S.month = Number(c.dataset.m); render(); });
+  const add = $('#addJob'); if (add) add.onclick = () => showJobForm(e.id);
+  document.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => showJobForm(e.id, b.dataset.edit));
+  document.querySelectorAll('[data-rm]').forEach((b) => b.onclick = () => confirmRemoveJob(b.dataset.rm));
+  document.querySelectorAll('[data-img]').forEach((i) => i.onclick = () => { const j = DB.jobs.find((x) => x.id === i.dataset.img); const m = modal(`<img src="${imgUrl(j)}" alt="">`, 'lb'); m.onclick = closeModal; });
+}
+
+function confirmRemoveJob(id) {
+  const j = DB.jobs.find((x) => x.id === id);
+  modal(`<h2>Xóa job?</h2><p>Xóa job <b>${esc(j.ideaCode)}</b>?</p><div class="err" id="err"></div>
+    <div class="row"><button class="danger" id="yes">Xóa</button><button class="ghost" id="no">Hủy</button></div>`);
+  $('#no').onclick = closeModal;
+  $('#yes').onclick = async () => {
+    busy($('#yes'), true);
+    if (j.imagePath) await sb.storage.from(BUCKET).remove([j.imagePath]);
+    const { error } = await sb.from('jobs').delete().eq('id', id); busy($('#yes'), false);
+    if (error) return ($('#err').textContent = errText(error));
+    closeModal(); await loadJobs(); render();
+  };
+}
+
+function shrinkImage(file, max = 1000, q = 0.75) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader(); r.onerror = () => reject(new Error('Không đọc được ảnh'));
+    r.onload = () => {
+      const img = new Image(); img.onerror = () => reject(new Error('File không phải ảnh hợp lệ'));
+      img.onload = () => {
+        const k = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        c.toBlob((b) => (b ? resolve({ blob: b, url: URL.createObjectURL(b) }) : reject(new Error('Không xử lý được ảnh'))), 'image/jpeg', q);
+      };
+      img.src = r.result;
+    };
+    r.readAsDataURL(file);
+  });
+}
+
+function showJobForm(empId, jobId) {
+  const j = jobId ? DB.jobs.find((x) => x.id === jobId) : null, mm = String(S.month).padStart(2, '0');
+  let newImg = null, removed = false;
+  modal(`<h2>${j ? 'Sửa job' : 'Thêm job'} · tháng ${S.month}/${S.year}</h2>
+    <label>Idea code *</label><input id="fCode" value="${esc(j?.ideaCode || '')}" placeholder="vd: VNH261001">
+    <label>Ngày bắt đầu *</label><input id="fStart" type="date" value="${j?.start || `${S.year}-${mm}-01`}">
+    <label>Ngày hoàn thành file (để trống nếu chưa xong)</label><input id="fEnd" type="date" value="${j?.end || ''}">
+    <label>Ảnh (không bắt buộc)</label><input id="fImg" type="file" accept="image/*">
+    <div id="prev" style="margin-top:8px"></div><div class="err" id="err"></div>
+    <div class="row"><button id="ok">Lưu</button><button class="ghost" id="cancel">Hủy</button></div>`);
+  const drawPrev = () => {
+    const src = newImg ? newImg.url : (!removed && j ? imgUrl(j) : '');
+    $('#prev').innerHTML = src ? `<img src="${src}" style="width:90px;height:90px;object-fit:cover;border-radius:8px"> <button class="danger" id="rmImg" type="button">Bỏ ảnh</button>` : '';
+    const b = $('#rmImg'); if (b) b.onclick = () => { newImg = null; removed = true; drawPrev(); };
+  };
+  drawPrev();
+  $('#cancel').onclick = closeModal;
+  $('#fImg').onchange = async (ev) => { const f = ev.target.files[0]; if (!f) return; try { newImg = await shrinkImage(f); removed = false; drawPrev(); $('#err').textContent = ''; } catch (e) { $('#err').textContent = e.message; } };
+  $('#ok').onclick = async () => {
+    const ideaCode = $('#fCode').value.trim(), start = $('#fStart').value, end = $('#fEnd').value;
+    if (!ideaCode) return ($('#err').textContent = 'Nhập Idea code.');
+    if (!start) return ($('#err').textContent = 'Nhập ngày bắt đầu.');
+    if (end && end < start) return ($('#err').textContent = 'Ngày hoàn thành không được trước ngày bắt đầu.');
+    busy($('#ok'), true);
+    try {
+      const id = j ? j.id : newId(); let path = j?.imagePath || null;
+      if (newImg) {
+        path = `${empId}/${id}.jpg`;
+        const up = await sb.storage.from(BUCKET).upload(path, newImg.blob, { upsert: true, contentType: 'image/jpeg' });
+        if (up.error) throw up.error; delete IMG[path];
+      } else if (removed && path) { await sb.storage.from(BUCKET).remove([path]); path = null; }
+      const row = { employee_id: empId, year: S.year, month: S.month, idea_code: ideaCode, start_date: start, end_date: end || null, image_path: path };
+      const { error } = j ? await sb.from('jobs').update(row).eq('id', id) : await sb.from('jobs').insert({ id, ...row });
+      if (error) throw error;
+      closeModal(); await loadJobs(); render();
+    } catch (e) { $('#err').textContent = errText(e); busy($('#ok'), false); }
+  };
+  $('#fCode').focus();
+}
+
+/* ---------- xuất CSV (quản lý) ---------- */
+function exportCsv() {
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const rows = [['Nhân viên', 'Mã NV', 'Năm', 'Tháng', 'Idea code', 'Bắt đầu', 'Hoàn thành file', 'Số ngày']];
+  for (const j of DB.jobs) { const e = DB.employees.find((x) => x.id === j.empId); rows.push([e?.name, e?.code, j.year, j.month, j.ideaCode, j.start, j.end || '', daysBetween(j.start, j.end) ?? '']); }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + rows.map((r) => r.map(q).join(',')).join('\n')], { type: 'text/csv' }));
+  a.download = `job3d-${S.year}.csv`; a.click();
+}
+
+/* ---------- khung chính ---------- */
+function render() {
+  const me = DB.employees.find((e) => e.id === S.myEmpId);
+  $('#who').textContent = isManager() ? `Quản lý · ${S.email}` : me ? `${me.name} · ${S.email}` : S.email;
+  S.empId ? renderEmployee() : renderEmployees();
+}
+$('#btnRefresh').onclick = () => (S.role ? (S.role === 'employee' && !S.myEmpId ? afterLogin() : reload()) : null);
+$('#btnCsv').onclick = exportCsv;
+$('#btnOut').onclick = async () => { await sb.auth.signOut(); showLogin(); };
+
+(async function boot() {
+  const c = window.APP_CONFIG || {};
+  if (!window.supabase || !c.SUPABASE_URL || /XXXX/.test(c.SUPABASE_URL) || /DAN_ANON/.test(c.SUPABASE_ANON_KEY || '')) {
+    $('#app').innerHTML = '<div class="card empty err">Chưa cấu hình. Mở file <b>config.js</b> và dán Project URL + anon key của Supabase vào.</div>'; return;
+  }
+  sb = window.supabase.createClient(c.SUPABASE_URL, c.SUPABASE_ANON_KEY);
+  sb.auth.onAuthStateChange((ev) => { if (ev === 'PASSWORD_RECOVERY') setTimeout(showNewPassword, 0); });
+  const { data: { session } } = await sb.auth.getSession();
+  if (session && !/type=recovery/.test(location.hash)) afterLogin(); else if (!session) showLogin();
+})();
+</script>
+</body>
+</html>
