@@ -60,11 +60,12 @@ td img{width:54px;height:54px;object-fit:cover;border-radius:6px;cursor:zoom-in;
 const BUCKET = 'job-images';
 let sb;
 let DB = { employees: [], jobs: [] };
-const S = { role: null /* 'manager' | 'employee' */, email: '', myEmpId: null, empId: null, year: new Date().getFullYear(), month: null };
+const S = { role: null /* 'manager' | 'employee' | 'guest' */, email: '', myEmpId: null, empId: null, year: new Date().getFullYear(), month: null };
 const IMG = {};   // image_path -> signed url
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const isManager = () => S.role === 'manager';
+const isGuest = () => S.role === 'guest';
 const canEdit = (empId) => isManager() || S.myEmpId === empId;
 const fmtDate = (d) => (d ? d.split('-').reverse().join('/') : '—');
 const daysBetween = (a, b) => (a && b ? Math.round((new Date(b) - new Date(a)) / 864e5) + 1 : null);
@@ -94,14 +95,13 @@ const busy = (btn, on) => { if (btn) { btn.disabled = on; if (on) btn.dataset.t 
 
 /* ---------- đăng nhập ---------- */
 function showLogin(msg = '') {
-  S.role = null; S.empId = null; S.myEmpId = null; $('#who').textContent = ''; $('#app').innerHTML = '';
-  setHeader(false);
   modal(`<h2>Đăng nhập</h2><div class="mu">Dùng email công ty đã được quản lý đăng ký cho bạn.</div>
     <label>Email</label><input id="lEmail" type="email" autocomplete="username">
     <label>Mật khẩu</label><input id="lPass" type="password" autocomplete="current-password">
     <div class="err" id="err">${esc(msg)}</div>
     <div class="row"><button id="login">Đăng nhập</button><button class="sec" id="signup">Tạo tài khoản lần đầu</button></div>
-    <div class="row"><span class="crumb" id="forgot">Quên mật khẩu?</span></div>`, '', true);
+    <div class="row sp"><span class="crumb" id="forgot">Quên mật khẩu?</span><button class="ghost" id="lCancel">Đóng</button></div>`);
+  $('#lCancel').onclick = closeModal;
   const val = () => ({ email: $('#lEmail').value.trim(), password: $('#lPass').value });
   $('#lPass').onkeydown = (e) => { if (e.key === 'Enter') $('#login').click(); };
   $('#login').onclick = async () => {
@@ -136,11 +136,21 @@ function showNewPassword() {
     closeModal(); afterLogin();
   };
 }
-function setHeader(on) { ['#btnRefresh', '#btnOut'].forEach((s) => ($(s).style.display = on ? '' : 'none')); $('#btnCsv').style.display = on && isManager() ? '' : 'none'; }
+function setHeader(on) {
+  ['#btnRefresh', '#btnOut'].forEach((s) => ($(s).style.display = on ? '' : 'none'));
+  $('#btnCsv').style.display = on && isManager() ? '' : 'none';
+  $('#btnOut').textContent = isGuest() ? 'Đăng nhập' : 'Đăng xuất';
+}
+
+/* ---------- chế độ khách (không cần đăng nhập, chỉ xem) ---------- */
+async function startGuest() {
+  S.role = 'guest'; S.email = ''; S.myEmpId = null; S.empId = null; S.month = null;
+  setHeader(true); await reload();
+}
 
 async function afterLogin() {
   const { data: { session } } = await sb.auth.getSession();
-  if (!session) return showLogin();
+  if (!session) return startGuest();
   S.email = session.user.email;
   const [m, e] = await Promise.all([sb.rpc('is_manager'), sb.rpc('my_employee_id')]);
   if (m.error || e.error) return showLogin('Không kiểm tra được quyền: ' + errText(m.error || e.error) + ' (đã chạy schema.sql chưa?)');
@@ -157,7 +167,8 @@ async function afterLogin() {
 const toJob = (r) => ({ id: r.id, empId: r.employee_id, year: r.year, month: r.month, ideaCode: r.idea_code, start: r.start_date, end: r.end_date, imagePath: r.image_path });
 async function reload() {
   $('#app').innerHTML = '<div class="empty">Đang tải…</div>';
-  const emps = await sb.from('employees').select('*').order('name');
+  // Quản lý đọc bảng employees (có email). Khách/nhân viên đọc view employees_public (chỉ id, tên, mã) để không lộ email.
+  const emps = await (isManager() ? sb.from('employees').select('*') : sb.from('employees_public').select('*')).order('name');
   if (emps.error) { $('#app').innerHTML = `<div class="card empty err">Lỗi tải dữ liệu: ${esc(errText(emps.error))}</div>`; return; }
   DB.employees = emps.data;
   await loadJobs(); render();
@@ -254,7 +265,7 @@ function renderEmployee() {
     const list = js.filter((j) => j.month === S.month), editable = canEdit(e.id);
     detail = `<div class="card" style="margin-top:14px">
       <div class="row sp"><b>Tháng ${S.month}/${S.year} · ${list.length} job</b>
-      ${editable ? '<button id="addJob">+ Thêm job</button>' : '<span class="mu">Chỉ xem (không phải job của bạn)</span>'}</div>
+      ${editable ? '<button id="addJob">+ Thêm job</button>' : `<span class="mu">${isGuest() ? 'Chỉ xem · đăng nhập để nhập job của bạn' : 'Chỉ xem (không phải job của bạn)'}</span>`}</div>
       ${list.length ? `<div class="scroll"><table><tr><th>Idea code</th><th>Bắt đầu</th><th>Hoàn thành file</th><th>Số ngày</th><th>Ảnh</th><th></th></tr>
       ${list.map((j) => { const d = daysBetween(j.start, j.end), u = imgUrl(j); return `<tr>
         <td><b>${esc(j.ideaCode)}</b></td><td>${fmtDate(j.start)}</td>
@@ -264,7 +275,7 @@ function renderEmployee() {
       </table></div>` : '<div class="empty">Chưa có job nào trong tháng này.</div>'}</div>`;
   }
   $('#app').innerHTML = `
-    ${isManager() || DB.employees.length > 1 ? '<div class="row"><span class="crumb" id="back">‹ Danh sách nhân viên</span></div>' : ''}
+    ${!S.role || S.role !== 'employee' || DB.employees.length > 1 ? '<div class="row"><span class="crumb" id="back">‹ Danh sách nhân viên</span></div>' : ''}
     <div class="row sp"><div><h2 style="margin:0">${esc(e.name)}</h2><div class="mu">Mã NV: ${esc(e.code)} · ${js.length} job năm ${S.year}</div></div>
       <div class="row" style="margin:0"><button class="ghost" id="yPrev">‹</button><b>Năm ${S.year}</b><button class="ghost" id="yNext">›</button></div></div>
     <div class="grid g-month">${months}</div>${detail}`;
@@ -361,12 +372,12 @@ function exportCsv() {
 /* ---------- khung chính ---------- */
 function render() {
   const me = DB.employees.find((e) => e.id === S.myEmpId);
-  $('#who').textContent = isManager() ? `Quản lý · ${S.email}` : me ? `${me.name} · ${S.email}` : S.email;
+  $('#who').textContent = isGuest() ? 'Khách (chỉ xem)' : isManager() ? `Quản lý · ${S.email}` : me ? `${me.name} · ${S.email}` : S.email;
   S.empId ? renderEmployee() : renderEmployees();
 }
 $('#btnRefresh').onclick = () => (S.role ? (S.role === 'employee' && !S.myEmpId ? afterLogin() : reload()) : null);
 $('#btnCsv').onclick = exportCsv;
-$('#btnOut').onclick = async () => { await sb.auth.signOut(); showLogin(); };
+$('#btnOut').onclick = async () => { if (isGuest()) return showLogin(); await sb.auth.signOut(); startGuest(); };
 
 (async function boot() {
   const c = window.APP_CONFIG || {};
@@ -376,7 +387,7 @@ $('#btnOut').onclick = async () => { await sb.auth.signOut(); showLogin(); };
   sb = window.supabase.createClient(c.SUPABASE_URL, c.SUPABASE_ANON_KEY);
   sb.auth.onAuthStateChange((ev) => { if (ev === 'PASSWORD_RECOVERY') setTimeout(showNewPassword, 0); });
   const { data: { session } } = await sb.auth.getSession();
-  if (session && !/type=recovery/.test(location.hash)) afterLogin(); else if (!session) showLogin();
+  if (session && !/type=recovery/.test(location.hash)) afterLogin(); else if (!session) startGuest();
 })();
 </script>
 </body>
