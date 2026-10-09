@@ -66,6 +66,21 @@ const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const isManager = () => S.role === 'manager';
 const isGuest = () => S.role === 'guest';
+// Tài khoản dạng tên đăng nhập: lưu trong Supabase dưới dạng "<tên>@<LOGIN_DOMAIN>" (email giả, không gửi mail)
+const LOGIN_DOMAIN = ((window.APP_CONFIG || {}).LOGIN_DOMAIN || 'job3d.local').toLowerCase();
+const toEmail = (u) => (u.includes('@') ? u : u + '@' + LOGIN_DOMAIN).toLowerCase();
+const userName = (email) => (email && email.endsWith('@' + LOGIN_DOMAIN) ? email.slice(0, -(LOGIN_DOMAIN.length + 1)) : (email || ''));
+async function callAdmin(body) {
+  // Gọi Supabase Edge Function "admin-users" (tự gửi kèm phiên đăng nhập của quản lý)
+  const { data, error } = await sb.functions.invoke('admin-users', { body });
+  if (error) {
+    let msg = '';
+    try { msg = (await error.context.json()).error; } catch (e) {}
+    if (!msg && error.context && error.context.status === 404) msg = 'Chưa tạo Edge Function admin-users trên Supabase (xem hướng dẫn).';
+    throw new Error(msg || error.message || 'Lỗi máy chủ');
+  }
+  return data;
+}
 const canEdit = (empId) => isManager() || S.myEmpId === empId;
 const fmtDate = (d) => (d ? d.split('-').reverse().join('/') : '—');
 const daysBetween = (a, b) => (a && b ? Math.round((new Date(b) - new Date(a)) / 864e5) + 1 : null);
@@ -75,7 +90,7 @@ const errText = (e) => {
   const m = (e && (e.message || e.error_description)) || String(e);
   if (e && e.code === '23505') return /idea/.test(e.message + (e.details || '')) ? 'Idea code này đã có trong danh sách của nhân viên.' : 'Mã nhân viên hoặc email đã tồn tại.';
   if (e && e.code === '42501' || /row-level security/i.test(m)) return 'Bạn không có quyền thực hiện thao tác này.';
-  if (/Invalid login/i.test(m)) return 'Sai email hoặc mật khẩu.';
+  if (/Invalid login/i.test(m)) return 'Sai tên đăng nhập hoặc mật khẩu.';
   if (/Email not confirmed/i.test(m)) return 'Email chưa được xác nhận. Hãy bấm vào link trong email Supabase đã gửi.';
   if (/already registered/i.test(m)) return 'Email này đã đăng ký. Hãy bấm Đăng nhập.';
   if (/Password should be/i.test(m)) return 'Mật khẩu tối thiểu 6 ký tự.';
@@ -95,35 +110,27 @@ const busy = (btn, on) => { if (btn) { btn.disabled = on; if (on) btn.dataset.t 
 
 /* ---------- đăng nhập ---------- */
 function showLogin(msg = '') {
-  modal(`<h2>Đăng nhập</h2><div class="mu">Dùng email công ty đã được quản lý đăng ký cho bạn.</div>
-    <label>Email</label><input id="lEmail" type="email" autocomplete="username">
+  modal(`<h2>Đăng nhập</h2><div class="mu">Dùng tên đăng nhập và mật khẩu do quản lý cấp.</div>
+    <label>Tên đăng nhập</label><input id="lEmail" autocomplete="username" autocapitalize="none" spellcheck="false">
     <label>Mật khẩu</label><input id="lPass" type="password" autocomplete="current-password">
     <div class="err" id="err">${esc(msg)}</div>
-    <div class="row"><button id="login">Đăng nhập</button><button class="sec" id="signup">Tạo tài khoản lần đầu</button></div>
-    <div class="row sp"><span class="crumb" id="forgot">Quên mật khẩu?</span><button class="ghost" id="lCancel">Đóng</button></div>`);
+    <div class="row sp"><button id="login">Đăng nhập</button><button class="ghost" id="lCancel">Đóng</button></div>
+    <div class="row"><span class="crumb" id="forgot">Quên mật khẩu?</span></div>`);
   $('#lCancel').onclick = closeModal;
-  const val = () => ({ email: $('#lEmail').value.trim(), password: $('#lPass').value });
   $('#lPass').onkeydown = (e) => { if (e.key === 'Enter') $('#login').click(); };
   $('#login').onclick = async () => {
-    const { email, password } = val(); if (!email || !password) return ($('#err').textContent = 'Nhập email và mật khẩu.');
+    const raw = $('#lEmail').value.trim(), password = $('#lPass').value;
+    if (!raw || !password) return ($('#err').textContent = 'Nhập tên đăng nhập và mật khẩu.');
     busy($('#login'), true);
-    const { error } = await sb.auth.signInWithPassword({ email, password });
+    const { error } = await sb.auth.signInWithPassword({ email: toEmail(raw), password });
     busy($('#login'), false);
     if (error) return ($('#err').textContent = errText(error));
     closeModal(); afterLogin();
   };
-  $('#signup').onclick = async () => {
-    const { email, password } = val(); if (!email || password.length < 6) return ($('#err').textContent = 'Nhập email và mật khẩu (tối thiểu 6 ký tự).');
-    busy($('#signup'), true);
-    const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
-    busy($('#signup'), false);
-    if (error) return ($('#err').textContent = errText(error));
-    if (data.session) { closeModal(); afterLogin(); }
-    else $('#err').innerHTML = '<span class="ok" style="color:var(--grn)">Đã gửi email xác nhận. Bấm vào link trong email, rồi quay lại đăng nhập.</span>';
-  };
   $('#forgot').onclick = async () => {
-    const { email } = val(); if (!email) return ($('#err').textContent = 'Nhập email trước rồi bấm lại.');
-    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+    const raw = $('#lEmail').value.trim();
+    if (!raw.includes('@') || raw.toLowerCase().endsWith('@' + LOGIN_DOMAIN)) return ($('#err').textContent = 'Hãy nhờ quản lý đặt lại mật khẩu cho bạn.');
+    const { error } = await sb.auth.resetPasswordForEmail(raw, { redirectTo: location.origin + location.pathname });
     $('#err').innerHTML = error ? esc(errText(error)) : '<span style="color:var(--grn)">Đã gửi email đặt lại mật khẩu.</span>';
   };
 }
@@ -157,7 +164,7 @@ async function afterLogin() {
   S.myEmpId = e.data || null; S.role = m.data ? 'manager' : 'employee';
   if (S.role === 'employee' && !S.myEmpId) {
     setHeader(true); $('#who').textContent = S.email;
-    $('#app').innerHTML = `<div class="card empty">Email <b>${esc(S.email)}</b> chưa được gắn với nhân viên nào.<br>Hãy nhờ quản lý thêm bạn vào danh sách với đúng email này, rồi bấm "Làm mới".</div>`; return;
+    $('#app').innerHTML = `<div class="card empty">Tài khoản <b>${esc(userName(S.email))}</b> chưa được gắn với nhân viên nào.<br>Hãy nhờ quản lý kiểm tra lại, rồi bấm "Làm mới".</div>`; return;
   }
   S.empId = S.role === 'employee' ? S.myEmpId : null; S.month = null;
   setHeader(true); await reload();
@@ -196,7 +203,7 @@ function renderEmployees() {
     return `<div class="card emp" data-id="${e.id}">
       ${isManager() ? `<span style="position:absolute;top:8px;right:8px;display:flex;gap:4px"><button class="sec" data-edit-emp="${e.id}" style="padding:2px 8px">Sửa</button><button class="danger" data-del="${e.id}" style="padding:2px 8px">Xóa</button></span>` : ''}
       <h3>${esc(e.name)}</h3><div class="mu">Mã NV: ${esc(e.code)}</div>
-      ${isManager() ? `<div class="mu">${e.email ? esc(e.email) : '<span style="color:var(--red)">chưa có email – chưa đăng nhập được</span>'}</div>` : ''}
+      ${isManager() ? `<div class="mu">${e.email ? 'Tên đăng nhập: ' + esc(userName(e.email)) : '<span style="color:var(--red)">chưa có tài khoản – chưa đăng nhập được</span>'}</div>` : ''}
       <div style="margin-top:8px"><span class="tag">${yr.length} job năm ${S.year}</span> <span class="tag ok">${done} đã xong file</span></div></div>`;
   }).join('');
   $('#app').innerHTML = `
@@ -219,19 +226,29 @@ function showEmployeeForm(id) {
   modal(`<h2>${e ? 'Sửa nhân viên' : 'Thêm nhân viên'}</h2>
     <label>Họ tên *</label><input id="nName" value="${esc(e?.name || '')}">
     <label>Mã nhân viên *</label><input id="nCode" value="${esc(e?.code || '')}" placeholder="vd: VNH">
-    <label>Email đăng nhập của nhân viên</label><input id="nMail" type="email" value="${esc(e?.email || '')}" placeholder="nhanvien@congty.com">
-    <div class="mu" style="margin-top:4px">Nhân viên đăng nhập bằng đúng email này để tự nhập job của mình.</div>
+    <label>Tên đăng nhập${e?.email ? '' : ' *'}</label><input id="nUser" value="${esc(userName(e?.email))}" placeholder="vd: vnh" autocapitalize="none" autocomplete="off" spellcheck="false">
+    <label>${e?.email ? 'Mật khẩu mới (để trống nếu không đổi)' : 'Mật khẩu * (tối thiểu 6 ký tự)'}</label><input id="nPass" type="text" autocomplete="off">
+    <div class="mu" style="margin-top:4px">Nhân viên dùng tên đăng nhập + mật khẩu này để vào web và nhập job của mình. Tên đăng nhập: chữ thường không dấu, số, . _ - (3–30 ký tự).</div>
     <div class="err" id="err"></div>
     <div class="row"><button id="ok">${e ? 'Lưu' : 'Thêm'}</button><button class="ghost" id="cancel">Hủy</button></div>`);
   $('#cancel').onclick = closeModal;
   $('#ok').onclick = async () => {
-    const name = $('#nName').value.trim(), code = $('#nCode').value.trim().toUpperCase(), email = $('#nMail').value.trim().toLowerCase() || null;
-    if (!name || !code) return ($('#err').textContent = 'Nhập đủ họ tên và mã nhân viên.');
+    const name = $('#nName').value.trim(), code = $('#nCode').value.trim().toUpperCase(), user = $('#nUser').value.trim().toLowerCase(), pass = $('#nPass').value;
+    const same = e && user === userName(e.email), E = (m) => ($('#err').textContent = m);
+    if (!name || !code) return E('Nhập đủ họ tên và mã nhân viên.');
+    if (user && !same && !/^[a-z0-9._-]{3,30}$/.test(user)) return E('Tên đăng nhập 3–30 ký tự: chữ thường không dấu, số, dấu . _ -');
+    if (pass && pass.length < 6) return E('Mật khẩu tối thiểu 6 ký tự.');
+    if (!e && (!user || !pass)) return E('Nhập tên đăng nhập và mật khẩu cho nhân viên mới.');
+    if (e && !e.email && (user || pass) && !(user && pass)) return E('Muốn cấp tài khoản cần nhập cả tên đăng nhập và mật khẩu.');
     busy($('#ok'), true);
-    const q = e ? sb.from('employees').update({ name, code, email }).eq('id', e.id) : sb.from('employees').insert({ name, code, email });
-    const { error } = await q; busy($('#ok'), false);
-    if (error) return ($('#err').textContent = errText(error));
-    closeModal(); await reload();
+    try {
+      if (!e) await callAdmin({ action: 'create', name, code, username: user, password: pass });
+      else {
+        const { error } = await sb.from('employees').update({ name, code }).eq('id', e.id); if (error) throw error;
+        if (pass || (user && !same)) await callAdmin({ action: 'set_login', employeeId: e.id, username: user || undefined, password: pass || undefined });
+      }
+      closeModal(); await reload();
+    } catch (x) { E(errText(x)); busy($('#ok'), false); }
   };
   $('#nName').focus();
 }
@@ -242,6 +259,7 @@ function confirmDeleteEmployee(id) {
   $('#no').onclick = closeModal;
   $('#yes').onclick = async () => {
     busy($('#yes'), true);
+    try { if (e.email) await callAdmin({ action: 'delete_user', employeeId: id }); } catch (x) { busy($('#yes'), false); return ($('#err').textContent = errText(x)); }
     try { const { data } = await sb.storage.from(BUCKET).list(id, { limit: 1000 }); if (data && data.length) await sb.storage.from(BUCKET).remove(data.map((f) => `${id}/${f.name}`)); } catch (x) {}
     const { error } = await sb.from('employees').delete().eq('id', id); busy($('#yes'), false);
     if (error) return ($('#err').textContent = errText(error));
@@ -372,7 +390,7 @@ function exportCsv() {
 /* ---------- khung chính ---------- */
 function render() {
   const me = DB.employees.find((e) => e.id === S.myEmpId);
-  $('#who').textContent = isGuest() ? 'Khách (chỉ xem)' : isManager() ? `Quản lý · ${S.email}` : me ? `${me.name} · ${S.email}` : S.email;
+  $('#who').textContent = isGuest() ? 'Khách (chỉ xem)' : isManager() ? `Quản lý · ${S.email}` : me ? `${me.name} · ${userName(S.email)}` : userName(S.email);
   S.empId ? renderEmployee() : renderEmployees();
 }
 $('#btnRefresh').onclick = () => (S.role ? (S.role === 'employee' && !S.myEmpId ? afterLogin() : reload()) : null);
