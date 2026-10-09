@@ -348,35 +348,66 @@ function showJobForm(empId, jobId) {
   $('#fCode').focus();
 }
 
-/* ---------- xuất CSV (quản lý) ---------- */
-function exportCsv() {
-  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const rows = [['Nhân viên', 'Mã NV', 'Năm', 'Tháng', 'Idea code', 'Bắt đầu', 'Hoàn thành file', 'Số ngày']];
-  for (const j of DB.jobs) { const e = DB.employees.find((x) => x.id === j.empId); rows.push([e?.name, e?.code, j.year, j.month, j.ideaCode, j.start, j.end || '', daysBetween(j.start, j.end) ?? '']); }
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob(['\uFEFF' + rows.map((r) => r.map(q).join(',')).join('\n')], { type: 'text/csv' }));
-  a.download = `job3d-${S.year}.csv`; a.click();
-}
-
-/* ---------- khung chính ---------- */
+/* ---------- khung chính & khởi động ---------- */
 function render() {
   const me = DB.employees.find((e) => e.id === S.myEmpId);
-  $('#who').textContent = isManager() ? `Quản lý · ${S.email}` : me ? `${me.name} · ${S.email}` : S.email;
+  if (S.role === 'manager') {
+    $('#who').textContent = `Quản lý · ${S.email}`;
+    $('#btnOut').style.display = '';
+  } else if (S.role === 'employee') {
+    $('#who').textContent = me ? `${me.name} (NV) · ${S.email}` : `${S.email}`;
+    $('#btnOut').style.display = '';
+  } else {
+    $('#who').textContent = 'Chế độ xem công khai (Khách)';
+    $('#btnOut').style.display = 'none';
+  }
   S.empId ? renderEmployee() : renderEmployees();
 }
-$('#btnRefresh').onclick = () => (S.role ? (S.role === 'employee' && !S.myEmpId ? afterLogin() : reload()) : null);
+
+$('#btnRefresh').onclick = () => reload();
 $('#btnCsv').onclick = exportCsv;
-$('#btnOut').onclick = async () => { await sb.auth.signOut(); showLogin(); };
+$('#btnOut').onclick = async () => { await sb.auth.signOut(); S.role = null; S.myEmpId = null; S.empId = null; await reload(); showLoginPromptButton(); };
+
+function showLoginPromptButton() {
+  // Thêm nút đăng nhập vào header nếu chưa đăng nhập
+  let btnLogin = $('#btnLogin');
+  if (!S.role) {
+    if (!btnLogin) {
+      btnLogin = document.createElement('button');
+      btnLogin.id = 'btnLogin';
+      btnLogin.textContent = 'Đăng nhập';
+      btnLogin.className = 'sec';
+      $('#btnRefresh').before(btnLogin);
+    }
+    btnLogin.onclick = () => showLogin();
+  } else if (btnLogin) {
+    btnLogin.remove();
+  }
+}
 
 (async function boot() {
   const c = window.APP_CONFIG || {};
-  if (!window.supabase || !c.SUPABASE_URL || /XXXX/.test(c.SUPABASE_URL) || /DAN_ANON/.test(c.SUPABASE_ANON_KEY || '')) {
-    $('#app').innerHTML = '<div class="card empty err">Chưa cấu hình. Mở file <b>config.js</b> và dán Project URL + anon key của Supabase vào.</div>'; return;
+  if (!window.supabase || !c.SUPABASE_URL || /XXXX/.test(c.SUPABASE_URL)) {
+    $('#app').innerHTML = '<div class='card empty err'>Chưa cấu hình file config.js.</div>'; return;
   }
   sb = window.supabase.createClient(c.SUPABASE_URL, c.SUPABASE_ANON_KEY);
   sb.auth.onAuthStateChange((ev) => { if (ev === 'PASSWORD_RECOVERY') setTimeout(showNewPassword, 0); });
+
+  // Kiểm tra xem đã đăng nhập chưa, nếu chưa vẫn cho phép tải dữ liệu xem bình thường
   const { data: { session } } = await sb.auth.getSession();
-  if (session && !/type=recovery/.test(location.hash)) afterLogin(); else if (!session) showLogin();
+  if (session) {
+    S.email = session.user.email;
+    const [m, e] = await Promise.all([sb.rpc('is_manager'), sb.rpc('my_employee_id')]);
+    S.myEmpId = e.data || null; 
+    S.role = m.data ? 'manager' : (S.myEmpId ? 'employee' : 'guest');
+  } else {
+    S.role = null;
+    S.myEmpId = null;
+  }
+
+  setHeader(true);
+  await reload();
+  showLoginPromptButton();
 })();
 </script>
 </body>
