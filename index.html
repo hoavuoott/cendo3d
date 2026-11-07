@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hoa hồng Idea 3D</title>
+<style>
+:root{--bg:#fff;--fg:#1f2329;--mut:#646a73;--line:#dee0e3;--acc:#1456f0;--soft:#f5f6f7;--warn:#d83931}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1c1f;--fg:#e8e9eb;--mut:#9aa0a6;--line:#363a40;--acc:#6f9bff;--soft:#25272b;--warn:#ff7b72}}
+*{box-sizing:border-box}
+body{margin:0;padding:12px;font:13px/1.45 system-ui,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--fg)}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+select,button{font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.45}
+#st{color:var(--mut)}
+h3{margin:18px 0 6px;font-size:14px}
+.w{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:560px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{background:var(--soft);font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr.tot td{font-weight:600;background:var(--soft)}
+.warn{color:var(--warn)}
+.note{color:var(--mut);margin:4px 0}
+input.pk{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:260px;max-width:100%}
+details{margin:14px 0;border:1px solid var(--line);border-radius:8px;padding:0 10px}
+summary{cursor:pointer;padding:9px 0}
+details[open] summary{border-bottom:1px solid var(--line);margin-bottom:8px}
+button.s{padding:3px 8px}
+#dd{display:none;position:fixed;z-index:50;max-height:250px;overflow:auto;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+#dd div{padding:6px 10px;cursor:pointer;border-bottom:1px solid var(--line)}
+#dd div:hover{background:var(--soft)}
+</style>
+</head>
+<body>
+<div class="bar">
+  <select id="month"></select>
+  <button id="run" class="p">Đồng bộ và tính</button>
+  <button id="xl" disabled>Xuất Excel</button>
+  <span id="st">Bấm "Đồng bộ và tính" để đọc dữ liệu.</span>
+</div>
+<div id="out"></div>
+<p class="note" id="ver" style="margin-top:20px"></p>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+import { bitable } from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk/+esm';
+
+/* ====== CẤU HÌNH: sửa ở đây nếu tên bảng/cột khác ====== */
+const C = {
+  tIdea: 'Production Tracking',
+  idea:  { name:'Name', code:'Idea Code', modeler:'3D Modeler', listing:'Product Listing Name', start:'Listing Date', end:'Expired Idea Date' },
+  order: { id:'ID', status:'Trạng thái', date:'Ngày tạo đơn', value:'Trị giá' },
+  prod:  { order:'Mã', name:'Tên sản phẩm', qty:'Số lượng' },
+  // Khi Lark trả về tên khác với tên bạn muốn hiển thị: khai báo theo tên extension đang hiện ở cột Họ tên
+  people: {
+    'Hoa Vu': { code: 'VNH', name: 'Vũ Thị Ngọc Hoa' }
+    // 'Tên Lark trả về': { code: 'PNT', name: 'Phạm Ngọc Tú' },
+    // 'Tên Lark trả về': { code: 'NMT', name: 'Nguyễn Mạnh Trung' },
+  },
+  rate: 0.007,
+  official: 'Đã nhận',        // hoa hồng chính thức
+  provisional: 'Đã xác nhận'  // hoa hồng tạm tính
+};
+/* ======================================================= */
+
+const VERSION = 'v1.2';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt = n => Math.round(n).toLocaleString('vi-VN');
+const dstr = t => { const d = new Date(t); return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`; };
+const norm = s => String(s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/g,'d').replace(/[^a-z0-9]/g,'');
+const txt = v => v == null ? '' : Array.isArray(v) ? v.map(txt).join('') : typeof v === 'object' ? (v.text ?? v.name ?? '') : String(v);
+const num = v => typeof v === 'number' ? v : (parseFloat(txt(v).replace(/[^\d.-]/g,'')) || 0);
+const ts = v => {
+  if (typeof v === 'number') return v;
+  const s = txt(v).trim(); if (!s) return null;
+  if (/^\d{10,13}$/.test(s)) return +s;
+  const m = s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return new Date(+m[3], m[2]-1, +m[1]).getTime();
+  const d = Date.parse(s); return isNaN(d) ? null : d;
+};
+const person = v => { const p = Array.isArray(v) ? v[0] : null; return p ? { id: p.id, name: p.name || p.enName || '', en: p.enName || '' } : null; };
+const empCode = n => (String(n).match(/\(([^)]+)\)\s*$/) || [])[1] || '';
+
+// Lựa chọn ghép = mapping.json (đặt cạnh index.html, bền vững qua mọi lần cập nhật) + phần chỉnh thêm lưu trong trình duyệt
+let FILEMAP = {}, LOCAL = {}, MAP = {}, STORE_OK = true;
+try { LOCAL = JSON.parse(localStorage.getItem('mapSp2') || '{}'); } catch(e){ STORE_OK = false; }
+const rebuildMap = () => { MAP = {}; for (const [k, v] of Object.entries({ ...FILEMAP, ...LOCAL })) if (v) MAP[k] = v; };
+rebuildMap();
+async function loadFileMap() {
+  try {
+    const r = await fetch('mapping.json?t=' + Date.now(), { cache: 'no-store' });
+    if (r.ok) { FILEMAP = await r.json(); rebuildMap(); }
+  } catch(e) { /* chưa có mapping.json thì bỏ qua */ }
+}
+const saveMap = () => {
+  LOCAL = {};
+  for (const k of Object.keys(MAP)) if (JSON.stringify(MAP[k]) !== JSON.stringify(FILEMAP[k])) LOCAL[k] = MAP[k];
+  for (const k of Object.keys(FILEMAP)) if (!(k in MAP)) LOCAL[k] = null;
+  try { localStorage.setItem('mapSp2', JSON.stringify(LOCAL)); } catch(e){ STORE_OK = false; }
+};
+let D = null, R = null;
+const OPEN = new Set();
+const LBL = new Map();
+const NOT3D = '__not3d';
+const fold = x => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
+const dd = document.createElement('div'); dd.id = 'dd'; document.body.appendChild(dd);
+let ddEl = null;
+function ddItems(q) {
+  const terms = fold(q).split(/\s+/).filter(Boolean), out = [];
+  if (terms.every(t => 'khong phai idea 3d'.includes(t))) out.push({ label: 'Không phải idea 3D', key: NOT3D });
+  for (const [label, key] of LBL) {
+    const f = fold(label);
+    if (terms.every(t => f.includes(t))) out.push({ label, key });
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+function hideDd() { dd.style.display = 'none'; }
+function showDd(el, q) {
+  ddEl = el;
+  const items = ddItems(q);
+  if (!items.length) { hideDd(); return; }
+  const r = el.getBoundingClientRect(), w = Math.max(r.width, 320);
+  dd.style.left = Math.max(4, Math.min(r.left, innerWidth - w - 4)) + 'px';
+  dd.style.width = w + 'px';
+  if (r.bottom + 260 > innerHeight && r.top > 260) { dd.style.top = 'auto'; dd.style.bottom = (innerHeight - r.top + 2) + 'px'; }
+  else { dd.style.bottom = 'auto'; dd.style.top = (r.bottom + 2) + 'px'; }
+  dd.innerHTML = items.map(i => `<div data-pick="${esc(i.key)}">${esc(i.label)}</div>`).join('');
+  dd.style.display = 'block';
+}
+function apply(k, key, n) {
+  MAP[k] = { t: key, n: n || (MAP[k] && MAP[k].n) || '' };
+  saveMap(); hideDd(); compute();
+  st(key === NOT3D ? 'Đã đánh dấu không phải idea 3D.' : 'Đã ghép. Chọn lại hoặc bấm "Bỏ ghép" nếu cần.');
+}
+
+// danh sách tháng
+(function(){
+  const now = new Date();
+  for (let i = 0; i < 9; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const o = document.createElement('option');
+    o.value = `${d.getFullYear()}-${d.getMonth()+1}`;
+    o.textContent = `Tháng ${d.getMonth()+1}/${d.getFullYear()}`;
+    $('month').appendChild(o);
+  }
+})();
+
+const st = s => $('st').textContent = s;
+
+async function load(base, meta, spec, label) {
+  const t = await base.getTableById(meta.id);
+  const fm = await t.getFieldMetaList();
+  const ids = {};
+  for (const [k, n] of Object.entries(spec)) {
+    const f = fm.find(x => x.name === n) || fm.find(x => x.name.toLowerCase().startsWith(n.toLowerCase()));
+    if (!f) throw new Error(`Bảng "${meta.name}" thiếu cột "${n}"`);
+    ids[k] = f.id;
+  }
+  const rows = []; let tk, page = 0;
+  do {
+    const r = await t.getRecords({ pageSize: 200, pageToken: tk });
+    for (const x of r.records) rows.push(Object.fromEntries(Object.keys(ids).map(k => [k, x.fields[ids[k]]])));
+    tk = r.hasMore ? r.pageToken : undefined;
+    if (++page % 5 === 0) st(`Đang đọc ${label}: ${rows.length} dòng…`);
+  } while (tk);
+  return rows;
+}
+
+async function sync() {
+  $('run').disabled = true; $('xl').disabled = true;
+  try {
+    st('Đang đọc dữ liệu…');
+    await loadFileMap();
+    const base = bitable.base;
+    const metas = await base.getTableMetaList();
+    const mi = metas.find(m => m.name === C.tIdea);
+    const mo = metas.find(m => m.name.includes('Đơn hàng'));
+    const mp = metas.find(m => m.name.includes('POS') && m.name.includes('Sản phẩm'));
+    if (!mi || !mo || !mp) throw new Error('Không tìm thấy bảng: ' + [!mi && C.tIdea, !mo && 'POS Đơn hàng', !mp && 'POS Sản phẩm'].filter(Boolean).join(', '));
+
+    const ir = await load(base, mi, C.idea, 'idea');
+    const or = await load(base, mo, C.order, 'đơn hàng');
+    const pr = await load(base, mp, C.prod, 'sản phẩm');
+
+    const ideas = [];
+    for (const r of ir) {
+      const key = norm(txt(r.listing)), s = ts(r.start), e = ts(r.end);
+      if (!key || s == null || e == null) continue;
+      ideas.push({ name: txt(r.name), code: txt(r.code), listing: txt(r.listing), key, start: s, end: e + 86399999, modeler: person(r.modeler) });
+    }
+    const orders = new Map();
+    for (const r of or) { const id = txt(r.id).trim(); if (id) orders.set(id, { status: txt(r.status).trim(), ts: ts(r.date), value: num(r.value) }); }
+    const lines = new Map();
+    for (const r of pr) {
+      const oid = txt(r.order).trim(), name = txt(r.name).trim(); if (!oid || !name) continue;
+      if (!lines.has(oid)) lines.set(oid, []);
+      lines.get(oid).push({ name, key: norm(name), w: num(r.qty) || 1 });
+    }
+    D = { ideas, orders, lines };
+    compute();
+    $('xl').disabled = false;
+    st(`Đã đồng bộ: ${ideas.length} idea có ngày listing, ${orders.size} đơn, ${pr.length} dòng sản phẩm. Lựa chọn ghép: ${Object.keys(MAP).length} (${Object.keys(FILEMAP).length} từ mapping.json).`);
+  } catch (e) {
+    st('Lỗi: ' + e.message); console.error(e);
+  }
+  $('run').disabled = false;
+}
+
+function compute() {
+  const [y, m] = $('month').value.split('-').map(Number);
+  const idx = new Map();
+  const s3 = k => k.replace(/3d$/, '');  // bỏ chữ "3D" ở cuối tên để so khớp
+  D.ideas.forEach(i => { const k = s3(i.key); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(i); });
+  const per = new Map(), un = new Map();
+  let skipped = 0, outside = 0, mixed = 0;
+
+  for (const [oid, o] of D.orders) {
+    if (o.ts == null) continue;
+    const d = new Date(o.ts);
+    if (d.getFullYear() !== y || d.getMonth() + 1 !== m) continue;
+    const kind = o.status === C.official ? 'off' : o.status === C.provisional ? 'prov' : null;
+    if (!kind) { skipped++; continue; }
+    const ls = D.lines.get(oid) || [];
+    const tot = ls.reduce((a, l) => a + l.w, 0);
+    if (!tot) continue;
+    const g = new Map();
+    ls.forEach(l => { const x = g.get(l.key) || { name: l.name, w: 0 }; x.w += l.w; g.set(l.key, x); });
+    const isMixed = g.size > 1; if (isMixed) mixed++;
+    for (const [k, x] of g) {
+      const share = o.value * x.w / tot;
+      if (MAP[k] && MAP[k].t === NOT3D) continue;
+      const cands = idx.get(s3((MAP[k] && MAP[k].t) || k));
+      if (!cands) { const u = un.get(k) || { name: x.name, rev: 0, n: 0 }; u.rev += share; u.n++; un.set(k, u); continue; }
+      const win = cands.filter(i => o.ts >= i.start && o.ts <= i.end);
+      if (!win.length) { outside++; continue; }
+      const idea = win.sort((a, b) => b.start - a.start)[0];
+      const p = per.get(idea) || { off: 0, prov: 0, rows: [] };
+      p[kind] += share;
+      p.rows.push({ oid, date: o.ts, status: o.status, rev: share, mixed: isMixed });
+      per.set(idea, p);
+    }
+  }
+
+  const people = new Map();
+  const ideaRows = [];
+  for (const [idea, p] of per) {
+    const who = idea.modeler;
+    const pk = who ? who.id : '_none';
+    const info = who ? (C.people[who.name] || C.people[who.en] || {}) : {};
+    const pp = people.get(pk) || {
+      code: who ? (info.code || empCode(who.name) || '') : '',
+      name: who ? (info.name || who.name.replace(/\s*\([^)]*\)\s*$/, '')) : 'Chưa gán 3D Modeler',
+      off: 0, prov: 0, n: 0 };
+    pp.off += p.off; pp.prov += p.prov; pp.n++; people.set(pk, pp);
+    ideaRows.push({ who: pp.name, code: pp.code, idea, ...p });
+  }
+  ideaRows.sort((a, b) => a.who.localeCompare(b.who) || b.off - a.off);
+  R = { y, m, people: [...people.values()].sort((a, b) => (b.off + b.prov) - (a.off + a.prov)), ideaRows, un: [...un.entries()].sort((a, b) => b[1].rev - a[1].rev), skipped, outside, mixed };
+  render();
+}
+
+function render() {
+  const r = R, rate = C.rate;
+  let h = '';
+  const unassigned = r.people.find(p => !p.code && p.name.startsWith('Chưa gán'));
+  if (unassigned) h += `<p class="warn">Có idea phát sinh doanh thu nhưng chưa gán 3D Modeler: doanh thu ${fmt(unassigned.off + unassigned.prov)} ₫ chưa được tính cho ai.</p>`;
+
+  h += `<h3>Tổng hợp tháng ${r.m}/${r.y}</h3><div class="w"><table><tr><th>Mã NV</th><th>Họ tên</th><th class="n">Số idea</th><th class="n">DT chính thức</th><th class="n">DT tạm tính</th><th class="n">HH chính thức</th><th class="n">HH tạm tính</th><th class="n">Tổng HH</th></tr>`;
+  let t = { off: 0, prov: 0 };
+  for (const p of r.people) {
+    t.off += p.off; t.prov += p.prov;
+    h += `<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n">${p.n}</td><td class="n">${fmt(p.off)}</td><td class="n">${fmt(p.prov)}</td><td class="n">${fmt(p.off * rate)}</td><td class="n">${fmt(p.prov * rate)}</td><td class="n">${fmt((p.off + p.prov) * rate)}</td></tr>`;
+  }
+  h += `<tr class="tot"><td colspan="3">Cộng</td><td class="n">${fmt(t.off)}</td><td class="n">${fmt(t.prov)}</td><td class="n">${fmt(t.off * rate)}</td><td class="n">${fmt(t.prov * rate)}</td><td class="n">${fmt((t.off + t.prov) * rate)}</td></tr></table></div>`;
+  h += `<p class="note">DT chính thức = đơn "${esc(C.official)}"; tạm tính = đơn "${esc(C.provisional)}". Đã bỏ ${r.skipped} đơn trạng thái khác (đang hoàn, hủy…), ${r.outside} dòng nằm ngoài cửa sổ 90 ngày, ${r.mixed} đơn có nhiều loại sản phẩm (doanh thu chia theo số lượng dòng).</p>`;
+
+  h += `<h3>Chi tiết theo idea</h3><div class="w"><table><tr><th>3D Modeler</th><th>Idea</th><th>Mã idea</th><th>Listing</th><th>Hết hạn HH</th><th class="n">Số đơn</th><th class="n">DT chính thức</th><th class="n">DT tạm tính</th><th class="n">Tổng HH</th></tr>`;
+  for (const x of r.ideaRows) {
+    h += `<tr><td>${esc(x.who)}</td><td>${esc(x.idea.name)}</td><td>${esc(x.idea.code)}</td><td>${dstr(x.idea.start)}</td><td>${dstr(x.idea.end)}</td><td class="n">${x.rows.length}</td><td class="n">${fmt(x.off)}</td><td class="n">${fmt(x.prov)}</td><td class="n">${fmt((x.off + x.prov) * rate)}</td></tr>`;
+  }
+  h += `</table></div>`;
+
+  LBL.clear();
+  D.ideas.forEach(i => LBL.set(`${i.listing} [${i.code}]`, i.key));
+  const labelOf = key => { if (key === NOT3D) return 'Không phải idea 3D'; for (const [l, k] of LBL) if (k === key) return l; return ''; };
+
+  h += `<details data-id="un" ${OPEN.has('un') ? 'open' : ''}><summary><b>Sản phẩm POS chưa khớp idea (${r.un.length})</b></summary>`;
+  if (r.un.length) {
+    h += `<p class="note">Gõ mã idea hoặc tên idea vào ô để tìm rồi chọn. Sản phẩm không thuộc idea nào của phòng 3D thì bấm "Không phải 3D". Lựa chọn được nhớ cho lần sau.</p><div class="w"><table><tr><th>Tên sản phẩm POS</th><th class="n">Dòng</th><th class="n">Doanh thu</th><th>Ghép với idea</th></tr>`;
+    for (const [k, u] of r.un.slice(0, 30)) {
+      h += `<tr><td>${esc(u.name)}</td><td class="n">${u.n}</td><td class="n">${fmt(u.rev)}</td><td><input class="pk" data-k="${esc(k)}" data-n="${esc(u.name)}" placeholder="Gõ mã hoặc tên idea…" autocomplete="off"> <button class="s" data-not3d="${esc(k)}" data-n="${esc(u.name)}">Không phải 3D</button></td></tr>`;
+    }
+    h += `</table></div>`;
+    if (r.un.length > 30) h += `<p class="note">Đang hiển thị 30/${r.un.length} sản phẩm doanh thu cao nhất.</p>`;
+  } else h += `<p class="note">Không còn sản phẩm nào chưa ghép trong tháng này.</p>`;
+  h += `</details>`;
+
+  const mk = Object.keys(MAP);
+  h += `<details data-id="mp" ${OPEN.has('mp') ? 'open' : ''}><summary><b>Đã ghép / đánh dấu thủ công (${mk.length})</b></summary>`;
+  if (mk.length) {
+    h += `<p class="note">Chọn nhầm thì bấm vào ô, gõ mã hoặc tên idea khác để đổi, hoặc bấm "Bỏ ghép".</p><div class="w"><table><tr><th>Tên sản phẩm POS</th><th>Đang ghép với</th><th></th></tr>`;
+    for (const k of mk) {
+      const lb = labelOf(MAP[k].t);
+      h += `<tr><td>${esc(MAP[k].n || k)}</td><td><input class="pk" data-k="${esc(k)}" data-n="${esc(MAP[k].n || '')}" value="${esc(lb)}" placeholder="(idea không còn) gõ để chọn lại…" autocomplete="off" style="width:320px"></td><td><button class="s" data-un="${esc(k)}">Bỏ ghép</button></td></tr>`;
+    }
+    h += `</table></div>`;
+  } else h += `<p class="note">Chưa có sản phẩm nào ghép hoặc đánh dấu thủ công.</p>`;
+  h += `</details>`;
+
+  h += `<details data-id="bk" ${OPEN.has('bk') ? 'open' : ''}><summary><b>Sao lưu lựa chọn ghép</b></summary>
+    <p class="note">Để không phải ghép lại mỗi lần cập nhật: bấm Sao chép, dán toàn bộ nội dung vào file <b>mapping.json</b> trong cùng thư mục với index.html trên GitHub rồi Commit. Từ đó mọi bản extension đều tự đọc file này.</p>
+    <textarea id="bk" readonly rows="8" style="width:100%;font:12px monospace;background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:6px">${esc(JSON.stringify(MAP, null, 1))}</textarea>
+    <p><button data-copy="1">Sao chép</button> ${STORE_OK ? '' : '<span class="warn">Trình duyệt trong Lark không lưu được dữ liệu, hãy dùng mapping.json.</span>'}</p></details>`;
+  $('out').innerHTML = h;
+}
+
+function exportXlsx() {
+  const r = R, rate = C.rate;
+  const sum = [['Mã NV', 'Họ tên', 'Số idea', 'Doanh thu chính thức', 'Doanh thu tạm tính', 'Hoa hồng chính thức', 'Hoa hồng tạm tính', 'Tổng hoa hồng']];
+  r.people.forEach(p => sum.push([p.code, p.name, p.n, Math.round(p.off), Math.round(p.prov), Math.round(p.off * rate), Math.round(p.prov * rate), Math.round((p.off + p.prov) * rate)]));
+  const idea = [['Mã NV', '3D Modeler', 'Idea', 'Mã idea', 'Listing Date', 'Hết hạn hoa hồng', 'Số đơn', 'Doanh thu chính thức', 'Doanh thu tạm tính', 'Tổng hoa hồng']];
+  r.ideaRows.forEach(x => idea.push([x.code, x.who, x.idea.name, x.idea.code, dstr(x.idea.start), dstr(x.idea.end), x.rows.length, Math.round(x.off), Math.round(x.prov), Math.round((x.off + x.prov) * rate)]));
+  const ord = [['Mã NV', 'Idea', 'Mã idea', 'Mã đơn', 'Ngày tạo đơn', 'Trạng thái', 'Doanh thu phân bổ', 'Hoa hồng', 'Đơn nhiều loại SP']];
+  r.ideaRows.forEach(x => x.rows.forEach(o => ord.push([x.code, x.idea.name, x.idea.code, o.oid, dstr(o.date), o.status, Math.round(o.rev), Math.round(o.rev * rate), o.mixed ? 'Có' : ''])));
+  const wb = XLSX.utils.book_new();
+  [['Tổng hợp', sum], ['Chi tiết idea', idea], ['Chi tiết đơn', ord]].forEach(([n, a]) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(a), n));
+  XLSX.writeFile(wb, `HoaHong_${r.y}-${String(r.m).padStart(2, '0')}.xlsx`);
+}
+
+$('ver').textContent = 'Phiên bản ' + VERSION;
+$('run').onclick = sync;
+$('xl').onclick = exportXlsx;
+$('month').onchange = () => { if (D) compute(); };
+$('out').addEventListener('toggle', e => {
+  const id = e.target.dataset && e.target.dataset.id;
+  if (id) e.target.open ? OPEN.add(id) : OPEN.delete(id);
+}, true);
+$('out').addEventListener('input', e => { if (e.target.classList && e.target.classList.contains('pk')) showDd(e.target, e.target.value); });
+$('out').addEventListener('focusin', e => { if (e.target.classList && e.target.classList.contains('pk')) { e.target.select(); showDd(e.target, ''); } });
+$('out').addEventListener('focusout', hideDd);
+$('out').addEventListener('keydown', e => {
+  if (!(e.target.classList && e.target.classList.contains('pk'))) return;
+  if (e.key === 'Escape') hideDd();
+  if (e.key === 'Enter') { const it = ddItems(e.target.value)[0]; if (it) apply(e.target.dataset.k, it.key, e.target.dataset.n); }
+});
+dd.addEventListener('mousedown', e => {
+  e.preventDefault();
+  const key = e.target.dataset && e.target.dataset.pick;
+  if (key && ddEl) apply(ddEl.dataset.k, key, ddEl.dataset.n);
+});
+addEventListener('scroll', hideDd, true);
+$('out').onclick = e => {
+  const d = e.target.dataset || {};
+  if (d.not3d) { apply(d.not3d, NOT3D, d.n); return; }
+  if (d.copy) {
+    const ta = document.getElementById('bk'); ta.select();
+    try { navigator.clipboard.writeText(ta.value).catch(() => document.execCommand('copy')); } catch(err) { document.execCommand('copy'); }
+    st('Đã sao chép. Dán vào mapping.json trên GitHub.'); return;
+  }
+  if (d.un) { delete MAP[d.un]; saveMap(); compute(); st('Đã bỏ ghép.'); }
+};
+</script>
+</body>
+</html>
