@@ -23,7 +23,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 tr.tot td{font-weight:600;background:var(--soft)}
 .warn{color:var(--warn)}
 .note{color:var(--mut);margin:4px 0}
-input.pk{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:260px;max-width:100%}
+input.pk,input.kw{font:inherit;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);width:260px;max-width:100%}
 details{margin:14px 0;border:1px solid var(--line);border-radius:8px;padding:0 10px}
 summary{cursor:pointer;padding:9px 0}
 details[open] summary{border-bottom:1px solid var(--line);margin-bottom:8px}
@@ -52,20 +52,23 @@ const C = {
   tIdea: 'Production Tracking',
   idea:  { name:'Name', code:'Idea Code', modeler:'3D Modeler', listing:'Product Listing Name', start:'Listing Date', end:'Expired Idea Date' },
   order: { id:'ID', status:'Trạng thái', date:'Ngày tạo đơn', value:'Trị giá' },
-  prod:  { order:'Mã', name:'Tên sản phẩm', qty:'Số lượng' },
+  prod:  { order:'Mã', name:'Tên sản phẩm', qty:'Số lượng', full:'Sản phẩm' },
   // Khi Lark trả về tên khác với tên bạn muốn hiển thị: khai báo theo tên extension đang hiện ở cột Họ tên
   people: {
-    'Hoa Vu': { code: 'VNH', name: 'Vũ Thị Ngọc Hoa' }
+    'Hoa Vu': { code: 'VNH', name: 'Vũ Thị Ngọc Hoa' },
+    'Tú': { code: 'PNT', name: 'Phạm Ngọc Tú' },
+    'Trung': { code: 'NMT', name: 'Nguyễn Mạnh Trung' }
     // 'Tên Lark trả về': { code: 'PNT', name: 'Phạm Ngọc Tú' },
     // 'Tên Lark trả về': { code: 'NMT', name: 'Nguyễn Mạnh Trung' },
   },
   rate: 0.007,
-  official: 'Đã nhận',        // hoa hồng chính thức
-  provisional: 'Đã xác nhận'  // hoa hồng tạm tính
+  official: ['Đã nhận', 'Đã gửi hàng'],  // hoàn thành: hoa hồng chính thức
+  provisional: ['Đã xác nhận'],           // tạm tính
+  minDate: new Date(2026, 7, 1).getTime(), // trước 01/08/2026 bỏ qua
 };
 /* ======================================================= */
 
-const VERSION = 'v1.2';
+const VERSION = 'v1.3';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = n => Math.round(n).toLocaleString('vi-VN');
@@ -103,7 +106,7 @@ const saveMap = () => {
 };
 let D = null, R = null;
 const OPEN = new Set();
-const LBL = new Map();
+let LBL = [];
 const NOT3D = '__not3d';
 const fold = x => String(x || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd');
 const dd = document.createElement('div'); dd.id = 'dd'; document.body.appendChild(dd);
@@ -111,13 +114,14 @@ let ddEl = null;
 function ddItems(q) {
   const terms = fold(q).split(/\s+/).filter(Boolean), out = [];
   if (terms.every(t => 'khong phai idea 3d'.includes(t))) out.push({ label: 'Không phải idea 3D', key: NOT3D });
-  for (const [label, key] of LBL) {
-    const f = fold(label);
+  for (const { label, key, search } of LBL) {
+    const f = fold(search);
     if (terms.every(t => f.includes(t))) out.push({ label, key });
     if (out.length >= 10) break;
   }
   return out;
 }
+const tk = x => [...new Set(fold(x).split(/[^a-z0-9]+/).filter(w => w && w !== '3d'))].sort().join(' ');
 function hideDd() { dd.style.display = 'none'; }
 function showDd(el, q) {
   ddEl = el;
@@ -131,8 +135,16 @@ function showDd(el, q) {
   dd.innerHTML = items.map(i => `<div data-pick="${esc(i.key)}">${esc(i.label)}</div>`).join('');
   dd.style.display = 'block';
 }
-function apply(k, key, n) {
-  MAP[k] = { t: key, n: n || (MAP[k] && MAP[k].n) || '' };
+function apply(k, key, n, el) {
+  if (el && el.dataset.rule) {
+    const kw = ((el.closest('td').querySelector('.kw') || {}).value || '').trim();
+    if (!kw) { hideDd(); st('Nhập từ khóa biến thể trước, rồi chọn idea.'); return; }
+    if (!MAP[k]) return;
+    MAP[k].v = (MAP[k].v || []).concat([{ kw, t: key }]);
+    saveMap(); hideDd(); compute(); st('Đã thêm quy tắc biến thể.'); return;
+  }
+  const old = MAP[k];
+  MAP[k] = { t: key, n: n || (old && old.n) || '', v: (old && old.v) || [] };
   saveMap(); hideDd(); compute();
   st(key === NOT3D ? 'Đã đánh dấu không phải idea 3D.' : 'Đã ghép. Chọn lại hoặc bấm "Bỏ ghép" nếu cần.');
 }
@@ -163,7 +175,7 @@ async function load(base, meta, spec, label) {
   const rows = []; let tk, page = 0;
   do {
     const r = await t.getRecords({ pageSize: 200, pageToken: tk });
-    for (const x of r.records) rows.push(Object.fromEntries(Object.keys(ids).map(k => [k, x.fields[ids[k]]])));
+    for (const x of r.records) rows.push({ _id: x.recordId, ...Object.fromEntries(Object.keys(ids).map(k => [k, x.fields[ids[k]]])) });
     tk = r.hasMore ? r.pageToken : undefined;
     if (++page % 5 === 0) st(`Đang đọc ${label}: ${rows.length} dòng…`);
   } while (tk);
@@ -188,9 +200,9 @@ async function sync() {
 
     const ideas = [];
     for (const r of ir) {
-      const key = norm(txt(r.listing)), s = ts(r.start), e = ts(r.end);
-      if (!key || s == null || e == null) continue;
-      ideas.push({ name: txt(r.name), code: txt(r.code), listing: txt(r.listing), key, start: s, end: e + 86399999, modeler: person(r.modeler) });
+      const st0 = ts(r.start); if (st0 == null) continue;
+      let en = ts(r.end); if (en == null) en = st0 + 90 * 86400000;
+      ideas.push({ id: r._id, name: txt(r.name), code: txt(r.code), listing: txt(r.listing), key: norm(txt(r.listing)), start: st0, end: en + 86399999, modeler: person(r.modeler) });
     }
     const orders = new Map();
     for (const r of or) { const id = txt(r.id).trim(); if (id) orders.set(id, { status: txt(r.status).trim(), ts: ts(r.date), value: num(r.value) }); }
@@ -198,12 +210,12 @@ async function sync() {
     for (const r of pr) {
       const oid = txt(r.order).trim(), name = txt(r.name).trim(); if (!oid || !name) continue;
       if (!lines.has(oid)) lines.set(oid, []);
-      lines.get(oid).push({ name, key: norm(name), w: num(r.qty) || 1 });
+      lines.get(oid).push({ name, key: norm(name), full: txt(r.full), w: num(r.qty) || 1 });
     }
     D = { ideas, orders, lines };
     compute();
     $('xl').disabled = false;
-    st(`Đã đồng bộ: ${ideas.length} idea có ngày listing, ${orders.size} đơn, ${pr.length} dòng sản phẩm. Lựa chọn ghép: ${Object.keys(MAP).length} (${Object.keys(FILEMAP).length} từ mapping.json).`);
+    st(`Đã đồng bộ: ${ideas.length} idea có Listing Date, ${orders.size} đơn, ${pr.length} dòng sản phẩm. Lựa chọn ghép: ${Object.keys(MAP).length} (${Object.keys(FILEMAP).length} từ mapping.json).`);
   } catch (e) {
     st('Lỗi: ' + e.message); console.error(e);
   }
@@ -212,35 +224,46 @@ async function sync() {
 
 function compute() {
   const [y, m] = $('month').value.split('-').map(Number);
-  const idx = new Map();
-  const s3 = k => k.replace(/3d$/, '');  // bỏ chữ "3D" ở cuối tên để so khớp
-  D.ideas.forEach(i => { const k = s3(i.key); if (!idx.has(k)) idx.set(k, []); idx.get(k).push(i); });
+  const byId = new Map(D.ideas.map(i => [i.id, i]));
+  const byKey = new Map(), auto = new Map();
+  const addTo = (mp, k, i) => { if (!k) return; const a = mp.get(k) || []; if (!a.includes(i)) a.push(i); mp.set(k, a); };
+  D.ideas.forEach(i => { addTo(byKey, i.key, i); addTo(auto, tk(i.listing), i); addTo(auto, tk(i.name), i); });
+  const resolve = t => byId.get(t) || (byKey.get(t) || []).slice().sort((a, b) => b.start - a.start)[0] || null;
   const per = new Map(), un = new Map();
+  const cov = { done: 0, outside: 0, not3d: 0, un: 0, noline: 0 };
   let skipped = 0, outside = 0, mixed = 0;
 
   for (const [oid, o] of D.orders) {
-    if (o.ts == null) continue;
+    if (o.ts == null || o.ts < C.minDate) continue;
     const d = new Date(o.ts);
     if (d.getFullYear() !== y || d.getMonth() + 1 !== m) continue;
-    const kind = o.status === C.official ? 'off' : o.status === C.provisional ? 'prov' : null;
+    const kind = C.official.includes(o.status) ? 'off' : C.provisional.includes(o.status) ? 'prov' : null;
     if (!kind) { skipped++; continue; }
     const ls = D.lines.get(oid) || [];
     const tot = ls.reduce((a, l) => a + l.w, 0);
-    if (!tot) continue;
-    const g = new Map();
-    ls.forEach(l => { const x = g.get(l.key) || { name: l.name, w: 0 }; x.w += l.w; g.set(l.key, x); });
-    const isMixed = g.size > 1; if (isMixed) mixed++;
-    for (const [k, x] of g) {
-      const share = o.value * x.w / tot;
-      if (MAP[k] && MAP[k].t === NOT3D) continue;
-      const cands = idx.get(s3((MAP[k] && MAP[k].t) || k));
-      if (!cands) { const u = un.get(k) || { name: x.name, rev: 0, n: 0 }; u.rev += share; u.n++; un.set(k, u); continue; }
-      const win = cands.filter(i => o.ts >= i.start && o.ts <= i.end);
-      if (!win.length) { outside++; continue; }
-      const idea = win.sort((a, b) => b.start - a.start)[0];
+    if (!tot) { cov.noline += o.value; continue; }
+    const isMixed = new Set(ls.map(l => l.key)).size > 1; if (isMixed) mixed++;
+    for (const l of ls) {
+      const share = o.value * l.w / tot;
+      const mp = MAP[l.key];
+      let idea = null, no3d = false;
+      if (mp) {
+        let t = mp.t;
+        const f = fold(l.full);
+        for (const v of mp.v || []) if (v.kw && f.includes(fold(v.kw))) { t = v.t; break; }
+        if (t === NOT3D) no3d = true; else idea = resolve(t);
+      } else {
+        const c = auto.get(tk(l.name));
+        if (c && c.length === 1) idea = c[0];
+      }
+      if (no3d) { cov.not3d += share; continue; }
+      if (!idea) { cov.un += share; const u = un.get(l.key) || { name: l.name, rev: 0, n: 0 }; u.rev += share; u.n++; un.set(l.key, u); continue; }
+      if (o.ts < idea.start || o.ts > idea.end) { cov.outside += share; outside++; continue; }
       const p = per.get(idea) || { off: 0, prov: 0, rows: [] };
-      p[kind] += share;
-      p.rows.push({ oid, date: o.ts, status: o.status, rev: share, mixed: isMixed });
+      p[kind] += share; cov.done += share;
+      const last = p.rows[p.rows.length - 1];
+      if (last && last.oid === oid) last.rev += share;
+      else p.rows.push({ oid, date: o.ts, status: o.status, rev: share, mixed: isMixed });
       per.set(idea, p);
     }
   }
@@ -259,7 +282,7 @@ function compute() {
     ideaRows.push({ who: pp.name, code: pp.code, idea, ...p });
   }
   ideaRows.sort((a, b) => a.who.localeCompare(b.who) || b.off - a.off);
-  R = { y, m, people: [...people.values()].sort((a, b) => (b.off + b.prov) - (a.off + a.prov)), ideaRows, un: [...un.entries()].sort((a, b) => b[1].rev - a[1].rev), skipped, outside, mixed };
+  R = { y, m, people: [...people.values()].sort((a, b) => (b.off + b.prov) - (a.off + a.prov)), ideaRows, un: [...un.entries()].sort((a, b) => b[1].rev - a[1].rev), skipped, outside, mixed, cov };
   render();
 }
 
@@ -276,7 +299,9 @@ function render() {
     h += `<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n">${p.n}</td><td class="n">${fmt(p.off)}</td><td class="n">${fmt(p.prov)}</td><td class="n">${fmt(p.off * rate)}</td><td class="n">${fmt(p.prov * rate)}</td><td class="n">${fmt((p.off + p.prov) * rate)}</td></tr>`;
   }
   h += `<tr class="tot"><td colspan="3">Cộng</td><td class="n">${fmt(t.off)}</td><td class="n">${fmt(t.prov)}</td><td class="n">${fmt(t.off * rate)}</td><td class="n">${fmt(t.prov * rate)}</td><td class="n">${fmt((t.off + t.prov) * rate)}</td></tr></table></div>`;
-  h += `<p class="note">DT chính thức = đơn "${esc(C.official)}"; tạm tính = đơn "${esc(C.provisional)}". Đã bỏ ${r.skipped} đơn trạng thái khác (đang hoàn, hủy…), ${r.outside} dòng nằm ngoài cửa sổ 90 ngày, ${r.mixed} đơn có nhiều loại sản phẩm (doanh thu chia theo số lượng dòng).</p>`;
+  { const cv = r.cov, T = cv.done + cv.outside + cv.not3d + cv.un + cv.noline || 1, pc = x => (x / T * 100).toFixed(1) + '%';
+    h += `<p class="note"><b>Độ phủ doanh thu tháng này:</b> đã tính hoa hồng ${pc(cv.done)} · ngoài 90 ngày ${pc(cv.outside)} · không phải idea 3D ${pc(cv.not3d)} · <span class="${cv.un / T > 0.05 ? 'warn' : ''}">chưa ghép ${pc(cv.un)}</span> · đơn thiếu dòng sản phẩm ${pc(cv.noline)}.</p>`; }
+  h += `<p class="note">DT chính thức = đơn đã nhận hoặc đã gửi hàng; tạm tính = đã xác nhận. Đã bỏ ${r.skipped} đơn trạng thái khác (đã hoàn, đang hoàn…), ${r.outside} dòng nằm ngoài 90 ngày, ${r.mixed} đơn có nhiều loại sản phẩm (chia theo số lượng). Đơn trước 01/08/2026 không tính.</p>`;
 
   h += `<h3>Chi tiết theo idea</h3><div class="w"><table><tr><th>3D Modeler</th><th>Idea</th><th>Mã idea</th><th>Listing</th><th>Hết hạn HH</th><th class="n">Số đơn</th><th class="n">DT chính thức</th><th class="n">DT tạm tính</th><th class="n">Tổng HH</th></tr>`;
   for (const x of r.ideaRows) {
@@ -284,9 +309,13 @@ function render() {
   }
   h += `</table></div>`;
 
-  LBL.clear();
-  D.ideas.forEach(i => LBL.set(`${i.listing} [${i.code}]`, i.key));
-  const labelOf = key => { if (key === NOT3D) return 'Không phải idea 3D'; for (const [l, k] of LBL) if (k === key) return l; return ''; };
+  LBL = D.ideas.map(i => ({ label: `${i.code} — ${i.name}`, key: i.id, search: `${i.code} ${i.name} ${i.listing}` }));
+  const labelOf = key => {
+    if (key === NOT3D) return 'Không phải idea 3D';
+    const x = LBL.find(z => z.key === key); if (x) return x.label;
+    const i = D.ideas.filter(z => z.key === key).sort((a, b) => b.start - a.start)[0];
+    return i ? `${i.code} — ${i.name}` : '';
+  };
 
   h += `<details data-id="un" ${OPEN.has('un') ? 'open' : ''}><summary><b>Sản phẩm POS chưa khớp idea (${r.un.length})</b></summary>`;
   if (r.un.length) {
@@ -302,10 +331,12 @@ function render() {
   const mk = Object.keys(MAP);
   h += `<details data-id="mp" ${OPEN.has('mp') ? 'open' : ''}><summary><b>Đã ghép / đánh dấu thủ công (${mk.length})</b></summary>`;
   if (mk.length) {
-    h += `<p class="note">Chọn nhầm thì bấm vào ô, gõ mã hoặc tên idea khác để đổi, hoặc bấm "Bỏ ghép".</p><div class="w"><table><tr><th>Tên sản phẩm POS</th><th>Đang ghép với</th><th></th></tr>`;
+    h += `<p class="note">Ô đầu là idea chính của sản phẩm (nhận cả các biến thể không có quy tắc riêng). Biến thể thuộc idea khác thì nhập từ khóa (ví dụ kuromi) rồi chọn idea. Chọn nhầm thì đổi lại hoặc bấm "Bỏ ghép".</p><div class="w"><table><tr><th>Tên sản phẩm POS</th><th>Đang ghép với</th><th></th></tr>`;
     for (const k of mk) {
-      const lb = labelOf(MAP[k].t);
-      h += `<tr><td>${esc(MAP[k].n || k)}</td><td><input class="pk" data-k="${esc(k)}" data-n="${esc(MAP[k].n || '')}" value="${esc(lb)}" placeholder="(idea không còn) gõ để chọn lại…" autocomplete="off" style="width:320px"></td><td><button class="s" data-un="${esc(k)}">Bỏ ghép</button></td></tr>`;
+      const mp = MAP[k], lb = labelOf(mp.t);
+      const rules = (mp.v || []).map((v, i) => `<div style="margin-top:3px">Biến thể chứa "<b>${esc(v.kw)}</b>" → ${esc(labelOf(v.t) || '?')} <button class="s" data-delrule="${esc(k)}|${i}">Xóa</button></div>`).join('');
+      const add = mp.t === NOT3D ? '' : `<div style="margin-top:5px"><input class="kw" placeholder="từ khóa biến thể" autocomplete="off" style="width:130px"> <input class="pk" data-rule="1" data-k="${esc(k)}" placeholder="chọn idea cho biến thể…" autocomplete="off" style="width:220px"></div>`;
+      h += `<tr><td>${esc(mp.n || k)}</td><td><input class="pk" data-k="${esc(k)}" data-n="${esc(mp.n || '')}" value="${esc(lb)}" placeholder="(idea không còn) gõ để chọn lại…" autocomplete="off" style="width:320px">${rules}${add}</td><td><button class="s" data-un="${esc(k)}">Bỏ ghép</button></td></tr>`;
     }
     h += `</table></div>`;
   } else h += `<p class="note">Chưa có sản phẩm nào ghép hoặc đánh dấu thủ công.</p>`;
@@ -345,17 +376,18 @@ $('out').addEventListener('focusout', hideDd);
 $('out').addEventListener('keydown', e => {
   if (!(e.target.classList && e.target.classList.contains('pk'))) return;
   if (e.key === 'Escape') hideDd();
-  if (e.key === 'Enter') { const it = ddItems(e.target.value)[0]; if (it) apply(e.target.dataset.k, it.key, e.target.dataset.n); }
+  if (e.key === 'Enter') { const it = ddItems(e.target.value)[0]; if (it) apply(e.target.dataset.k, it.key, e.target.dataset.n, e.target); }
 });
 dd.addEventListener('mousedown', e => {
   e.preventDefault();
   const key = e.target.dataset && e.target.dataset.pick;
-  if (key && ddEl) apply(ddEl.dataset.k, key, ddEl.dataset.n);
+  if (key && ddEl) apply(ddEl.dataset.k, key, ddEl.dataset.n, ddEl);
 });
 addEventListener('scroll', hideDd, true);
 $('out').onclick = e => {
   const d = e.target.dataset || {};
   if (d.not3d) { apply(d.not3d, NOT3D, d.n); return; }
+  if (d.delrule) { const [k, i] = d.delrule.split('|'); const mp = MAP[k]; if (mp && mp.v) { mp.v.splice(+i, 1); saveMap(); compute(); } return; }
   if (d.copy) {
     const ta = document.getElementById('bk'); ta.select();
     try { navigator.clipboard.writeText(ta.value).catch(() => document.execCommand('copy')); } catch(err) { document.execCommand('copy'); }
