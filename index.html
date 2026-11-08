@@ -50,7 +50,7 @@ import { bitable } from 'https://cdn.jsdelivr.net/npm/@lark-base-open/js-sdk/+es
 /* ====== CẤU HÌNH: sửa ở đây nếu tên bảng/cột khác ====== */
 const C = {
   tIdea: 'Production Tracking',
-  idea:  { name:'Name', code:'Idea Code', modeler:'3D Modeler', listing:'Product Listing Name', start:'Listing Date', end:'Expired Idea Date' },
+  idea:  { name:'Name', code:'Idea Code', modeler:'3D Modeler', owner:'Owner', listing:'Product Listing Name', start:'Listing Date', end:'Expired Idea Date' },
   order: { id:'ID', status:'Trạng thái', date:'Ngày tạo đơn', value:'Trị giá' },
   prod:  { order:'Mã', name:'Tên sản phẩm', qty:'Số lượng', full:'Sản phẩm' },
   // Khi Lark trả về tên khác với tên bạn muốn hiển thị: khai báo theo tên extension đang hiện ở cột Họ tên
@@ -61,14 +61,15 @@ const C = {
     // 'Tên Lark trả về': { code: 'PNT', name: 'Phạm Ngọc Tú' },
     // 'Tên Lark trả về': { code: 'NMT', name: 'Nguyễn Mạnh Trung' },
   },
-  rate: 0.007,
+  rate3d: 0.007,   // 3D Modeler: 0,7% doanh thu idea
+  rateOwner: 0.01, // Owner (người lên idea): 1% doanh thu idea; một người vừa lên idea vừa làm 3D nhận cả hai
   official: ['Đã nhận', 'Đã gửi hàng'],  // hoàn thành: hoa hồng chính thức
   provisional: ['Đã xác nhận'],           // tạm tính
   minDate: new Date(2026, 7, 1).getTime(), // trước 01/08/2026 bỏ qua
 };
 /* ======================================================= */
 
-const VERSION = 'v1.3';
+const VERSION = 'v1.4';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt = n => Math.round(n).toLocaleString('vi-VN');
@@ -85,6 +86,7 @@ const ts = v => {
   const d = Date.parse(s); return isNaN(d) ? null : d;
 };
 const person = v => { const p = Array.isArray(v) ? v[0] : null; return p ? { id: p.id, name: p.name || p.enName || '', en: p.enName || '' } : null; };
+const pinfo = u => { if (!u) return null; const f = C.people[u.name] || C.people[u.en] || {}; return { code: f.code || empCode(u.name) || '', name: f.name || u.name.replace(/\s*\([^)]*\)\s*$/, '') }; };
 const empCode = n => (String(n).match(/\(([^)]+)\)\s*$/) || [])[1] || '';
 
 // Lựa chọn ghép = mapping.json (đặt cạnh index.html, bền vững qua mọi lần cập nhật) + phần chỉnh thêm lưu trong trình duyệt
@@ -202,7 +204,7 @@ async function sync() {
     for (const r of ir) {
       const st0 = ts(r.start); if (st0 == null) continue;
       let en = ts(r.end); if (en == null) en = st0 + 90 * 86400000;
-      ideas.push({ id: r._id, name: txt(r.name), code: txt(r.code), listing: txt(r.listing), key: norm(txt(r.listing)), start: st0, end: en + 86399999, modeler: person(r.modeler) });
+      ideas.push({ id: r._id, name: txt(r.name), code: txt(r.code), listing: txt(r.listing), key: norm(txt(r.listing)), start: st0, end: en + 86399999, modeler: person(r.modeler), owner: person(r.owner) });
     }
     const orders = new Map();
     for (const r of or) { const id = txt(r.id).trim(); if (id) orders.set(id, { status: txt(r.status).trim(), ts: ts(r.date), value: num(r.value) }); }
@@ -268,44 +270,49 @@ function compute() {
     }
   }
 
-  const people = new Map();
-  const ideaRows = [];
+  const people = new Map(), ideaRows = [];
+  const getP = (u, role) => {
+    const pk = u ? u.id : '_none' + role, i = pinfo(u);
+    let x = people.get(pk);
+    if (!x) { x = { code: i ? i.code : '', name: i ? i.name : 'Chưa gán ' + (role === '3d' ? '3D Modeler' : 'Owner'), none: !u, off3: 0, prov3: 0, offO: 0, provO: 0, n3: 0, nO: 0 }; people.set(pk, x); }
+    return x;
+  };
   for (const [idea, p] of per) {
-    const who = idea.modeler;
-    const pk = who ? who.id : '_none';
-    const info = who ? (C.people[who.name] || C.people[who.en] || {}) : {};
-    const pp = people.get(pk) || {
-      code: who ? (info.code || empCode(who.name) || '') : '',
-      name: who ? (info.name || who.name.replace(/\s*\([^)]*\)\s*$/, '')) : 'Chưa gán 3D Modeler',
-      off: 0, prov: 0, n: 0 };
-    pp.off += p.off; pp.prov += p.prov; pp.n++; people.set(pk, pp);
-    ideaRows.push({ who: pp.name, code: pp.code, idea, ...p });
+    const mo = getP(idea.modeler, '3d'), ow = getP(idea.owner, 'own');
+    mo.off3 += p.off; mo.prov3 += p.prov; mo.n3++;
+    ow.offO += p.off; ow.provO += p.prov; ow.nO++;
+    ideaRows.push({ idea, mod: mo, own: ow, ...p });
   }
-  ideaRows.sort((a, b) => a.who.localeCompare(b.who) || b.off - a.off);
-  R = { y, m, people: [...people.values()].sort((a, b) => (b.off + b.prov) - (a.off + a.prov)), ideaRows, un: [...un.entries()].sort((a, b) => b[1].rev - a[1].rev), skipped, outside, mixed, cov };
+  const r3 = C.rate3d, rO = C.rateOwner;
+  const plist = [...people.values()].map(x => Object.assign(x, {
+    hh3: (x.off3 + x.prov3) * r3, hhO: (x.offO + x.provO) * rO,
+    hhOff: x.off3 * r3 + x.offO * rO, hhProv: x.prov3 * r3 + x.provO * rO
+  })).map(x => Object.assign(x, { total: x.hh3 + x.hhO })).sort((a, b) => b.total - a.total);
+  ideaRows.sort((a, b) => a.mod.name.localeCompare(b.mod.name) || (b.off + b.prov) - (a.off + a.prov));
+  R = { y, m, people: plist, ideaRows, un: [...un.entries()].sort((a, b) => b[1].rev - a[1].rev), skipped, outside, mixed, cov };
   render();
 }
 
 function render() {
-  const r = R, rate = C.rate;
+  const r = R, r3 = C.rate3d, rO = C.rateOwner;
   let h = '';
-  const unassigned = r.people.find(p => !p.code && p.name.startsWith('Chưa gán'));
-  if (unassigned) h += `<p class="warn">Có idea phát sinh doanh thu nhưng chưa gán 3D Modeler: doanh thu ${fmt(unassigned.off + unassigned.prov)} ₫ chưa được tính cho ai.</p>`;
+  for (const p of r.people) if (p.none && (p.off3 + p.prov3 + p.offO + p.provO) > 0)
+    h += `<p class="warn">${esc(p.name)}: có doanh thu ${fmt(p.off3 + p.prov3 + p.offO + p.provO)} ₫ nhưng idea chưa điền, chưa tính cho ai.</p>`;
 
-  h += `<h3>Tổng hợp tháng ${r.m}/${r.y}</h3><div class="w"><table><tr><th>Mã NV</th><th>Họ tên</th><th class="n">Số idea</th><th class="n">DT chính thức</th><th class="n">DT tạm tính</th><th class="n">HH chính thức</th><th class="n">HH tạm tính</th><th class="n">Tổng HH</th></tr>`;
-  let t = { off: 0, prov: 0 };
+  h += `<h3>Tổng hợp tháng ${r.m}/${r.y}</h3><div class="w"><table><tr><th>Mã NV</th><th>Họ tên</th><th class="n">HH làm 3D (${+(r3 * 100).toFixed(1)}%)</th><th class="n">HH owner idea (${+(rO * 100).toFixed(1)}%)</th><th class="n">HH chính thức</th><th class="n">HH tạm tính</th><th class="n">Tổng HH</th></tr>`;
+  const t = { hh3: 0, hhO: 0, hhOff: 0, hhProv: 0, total: 0 };
   for (const p of r.people) {
-    t.off += p.off; t.prov += p.prov;
-    h += `<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n">${p.n}</td><td class="n">${fmt(p.off)}</td><td class="n">${fmt(p.prov)}</td><td class="n">${fmt(p.off * rate)}</td><td class="n">${fmt(p.prov * rate)}</td><td class="n">${fmt((p.off + p.prov) * rate)}</td></tr>`;
+    for (const k in t) t[k] += p[k];
+    h += `<tr><td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="n">${fmt(p.hh3)}</td><td class="n">${fmt(p.hhO)}</td><td class="n">${fmt(p.hhOff)}</td><td class="n">${fmt(p.hhProv)}</td><td class="n">${fmt(p.total)}</td></tr>`;
   }
-  h += `<tr class="tot"><td colspan="3">Cộng</td><td class="n">${fmt(t.off)}</td><td class="n">${fmt(t.prov)}</td><td class="n">${fmt(t.off * rate)}</td><td class="n">${fmt(t.prov * rate)}</td><td class="n">${fmt((t.off + t.prov) * rate)}</td></tr></table></div>`;
+  h += `<tr class="tot"><td colspan="2">Cộng</td><td class="n">${fmt(t.hh3)}</td><td class="n">${fmt(t.hhO)}</td><td class="n">${fmt(t.hhOff)}</td><td class="n">${fmt(t.hhProv)}</td><td class="n">${fmt(t.total)}</td></tr></table></div>`;
   { const cv = r.cov, T = cv.done + cv.outside + cv.not3d + cv.un + cv.noline || 1, pc = x => (x / T * 100).toFixed(1) + '%';
     h += `<p class="note"><b>Độ phủ doanh thu tháng này:</b> đã tính hoa hồng ${pc(cv.done)} · ngoài 90 ngày ${pc(cv.outside)} · không phải idea 3D ${pc(cv.not3d)} · <span class="${cv.un / T > 0.05 ? 'warn' : ''}">chưa ghép ${pc(cv.un)}</span> · đơn thiếu dòng sản phẩm ${pc(cv.noline)}.</p>`; }
-  h += `<p class="note">DT chính thức = đơn đã nhận hoặc đã gửi hàng; tạm tính = đã xác nhận. Đã bỏ ${r.skipped} đơn trạng thái khác (đã hoàn, đang hoàn…), ${r.outside} dòng nằm ngoài 90 ngày, ${r.mixed} đơn có nhiều loại sản phẩm (chia theo số lượng). Đơn trước 01/08/2026 không tính.</p>`;
+  h += `<p class="note">HH chính thức = đơn đã nhận hoặc đã gửi hàng; tạm tính = đã xác nhận. Một người vừa là Owner vừa là 3D Modeler của idea thì nhận cả hai khoản. Đã bỏ ${r.skipped} đơn trạng thái khác (đã hoàn, đang hoàn…), ${r.outside} dòng nằm ngoài 90 ngày, ${r.mixed} đơn có nhiều loại sản phẩm (chia theo số lượng). Đơn trước 01/08/2026 không tính.</p>`;
 
-  h += `<h3>Chi tiết theo idea</h3><div class="w"><table><tr><th>3D Modeler</th><th>Idea</th><th>Mã idea</th><th>Listing</th><th>Hết hạn HH</th><th class="n">Số đơn</th><th class="n">DT chính thức</th><th class="n">DT tạm tính</th><th class="n">Tổng HH</th></tr>`;
+  h += `<h3>Chi tiết theo idea</h3><div class="w"><table><tr><th>3D Modeler</th><th>Owner</th><th>Idea</th><th>Mã idea</th><th>Listing</th><th>Hết hạn HH</th><th class="n">Số đơn</th><th class="n">DT chính thức</th><th class="n">DT tạm tính</th><th class="n">HH 3D</th><th class="n">HH owner</th></tr>`;
   for (const x of r.ideaRows) {
-    h += `<tr><td>${esc(x.who)}</td><td>${esc(x.idea.name)}</td><td>${esc(x.idea.code)}</td><td>${dstr(x.idea.start)}</td><td>${dstr(x.idea.end)}</td><td class="n">${x.rows.length}</td><td class="n">${fmt(x.off)}</td><td class="n">${fmt(x.prov)}</td><td class="n">${fmt((x.off + x.prov) * rate)}</td></tr>`;
+    h += `<tr><td>${esc(x.mod.name)}</td><td>${esc(x.own.name)}</td><td>${esc(x.idea.name)}</td><td>${esc(x.idea.code)}</td><td>${dstr(x.idea.start)}</td><td>${dstr(x.idea.end)}</td><td class="n">${x.rows.length}</td><td class="n">${fmt(x.off)}</td><td class="n">${fmt(x.prov)}</td><td class="n">${fmt((x.off + x.prov) * r3)}</td><td class="n">${fmt((x.off + x.prov) * rO)}</td></tr>`;
   }
   h += `</table></div>`;
 
@@ -350,13 +357,13 @@ function render() {
 }
 
 function exportXlsx() {
-  const r = R, rate = C.rate;
-  const sum = [['Mã NV', 'Họ tên', 'Số idea', 'Doanh thu chính thức', 'Doanh thu tạm tính', 'Hoa hồng chính thức', 'Hoa hồng tạm tính', 'Tổng hoa hồng']];
-  r.people.forEach(p => sum.push([p.code, p.name, p.n, Math.round(p.off), Math.round(p.prov), Math.round(p.off * rate), Math.round(p.prov * rate), Math.round((p.off + p.prov) * rate)]));
-  const idea = [['Mã NV', '3D Modeler', 'Idea', 'Mã idea', 'Listing Date', 'Hết hạn hoa hồng', 'Số đơn', 'Doanh thu chính thức', 'Doanh thu tạm tính', 'Tổng hoa hồng']];
-  r.ideaRows.forEach(x => idea.push([x.code, x.who, x.idea.name, x.idea.code, dstr(x.idea.start), dstr(x.idea.end), x.rows.length, Math.round(x.off), Math.round(x.prov), Math.round((x.off + x.prov) * rate)]));
-  const ord = [['Mã NV', 'Idea', 'Mã idea', 'Mã đơn', 'Ngày tạo đơn', 'Trạng thái', 'Doanh thu phân bổ', 'Hoa hồng', 'Đơn nhiều loại SP']];
-  r.ideaRows.forEach(x => x.rows.forEach(o => ord.push([x.code, x.idea.name, x.idea.code, o.oid, dstr(o.date), o.status, Math.round(o.rev), Math.round(o.rev * rate), o.mixed ? 'Có' : ''])));
+  const r = R, r3 = C.rate3d, rO = C.rateOwner, R0 = Math.round;
+  const sum = [['Mã NV', 'Họ tên', 'Số idea làm 3D', 'Số idea owner', 'HH làm 3D', 'HH owner idea', 'HH chính thức', 'HH tạm tính', 'Tổng HH']];
+  r.people.forEach(p => sum.push([p.code, p.name, p.n3, p.nO, R0(p.hh3), R0(p.hhO), R0(p.hhOff), R0(p.hhProv), R0(p.total)]));
+  const idea = [['Mã NV 3D', '3D Modeler', 'Mã NV Owner', 'Owner', 'Idea', 'Mã idea', 'Listing Date', 'Hết hạn hoa hồng', 'Số đơn', 'DT chính thức', 'DT tạm tính', 'HH 3D', 'HH owner']];
+  r.ideaRows.forEach(x => idea.push([x.mod.code, x.mod.name, x.own.code, x.own.name, x.idea.name, x.idea.code, dstr(x.idea.start), dstr(x.idea.end), x.rows.length, R0(x.off), R0(x.prov), R0((x.off + x.prov) * r3), R0((x.off + x.prov) * rO)]));
+  const ord = [['Idea', 'Mã idea', 'Mã NV 3D', 'Mã NV Owner', 'Mã đơn', 'Ngày tạo đơn', 'Trạng thái', 'DT phân bổ', 'HH 3D', 'HH owner', 'Đơn nhiều loại SP']];
+  r.ideaRows.forEach(x => x.rows.forEach(o => ord.push([x.idea.name, x.idea.code, x.mod.code, x.own.code, o.oid, dstr(o.date), o.status, R0(o.rev), R0(o.rev * r3), R0(o.rev * rO), o.mixed ? 'Có' : ''])));
   const wb = XLSX.utils.book_new();
   [['Tổng hợp', sum], ['Chi tiết idea', idea], ['Chi tiết đơn', ord]].forEach(([n, a]) => XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(a), n));
   XLSX.writeFile(wb, `HoaHong_${r.y}-${String(r.m).padStart(2, '0')}.xlsx`);
